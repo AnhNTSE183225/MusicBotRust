@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "hooks": {
+    "preCompact": [
+      {
+        "command": "node .harness/harness.mjs hook-pre-compact",
+        "timeout": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "node .harness/harness.mjs hook-post-tool",
+        "timeout": 5
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "node .harness/harness.mjs hook-post-tool",
+        "timeout": 5
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "node .harness/guard-write.mjs",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "node .harness/guard-write.mjs",
+        "timeout": 5,
+        "failClosed": true
+      }
+    ]
+  }
+}

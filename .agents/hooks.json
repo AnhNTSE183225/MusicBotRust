@@ -1,0 +1,37 @@
+{
+  "continuous-memory-pulse": {
+    "PostToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ../.harness/harness.mjs hook-post-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "node ../.harness/harness.mjs hook-post-invocation",
+        "timeout": 10
+      }
+    ]
+  },
+  "protect-state-files": {
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ../.harness/guard-write.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
