@@ -1,1 +1,5 @@
 .agent/artifacts/
+.env
+*.md
+.agent/
+.cursor/
