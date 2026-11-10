@@ -22,11 +22,37 @@ if [ -f "$ROOT_DIR/bot.pid" ]; then
 fi
 
 # Ensure Rust/Cargo toolchain is loaded (required for non-interactive SSH sessions)
-if [ -f "$HOME/.cargo/env" ]; then
-    # shellcheck disable=SC1091
-    source "$HOME/.cargo/env"
+for cargo_env in "$HOME/.cargo/env" "/root/.cargo/env"; do
+    if [ -f "$cargo_env" ]; then
+        # shellcheck disable=SC1091
+        source "$cargo_env"
+        break
+    fi
+done
+
+for cargo_bin in "$HOME/.cargo/bin" "/usr/local/cargo/bin" "/snap/bin"; do
+    if [ -d "$cargo_bin" ]; then
+        export PATH="$cargo_bin:$PATH"
+    fi
+done
+
+# If cargo is still not found, automatically bootstrap Rust toolchain via rustup
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "Rust toolchain not found on server. Installing Rust via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+    if [ -f "$HOME/.cargo/env" ]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    fi
+    export PATH="$HOME/.cargo/bin:$PATH"
 fi
-export PATH="$HOME/.cargo/bin:$PATH"
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "ERROR: Failed to locate or install cargo! Please ensure Rust is available on this system."
+    exit 1
+fi
+
+echo "Using: $(cargo --version)"
 
 if [ "${1:-}" = "-Clean" ] || [ "${1:-}" = "--clean" ]; then
     echo "Cleaning build artifacts..."
