@@ -74,14 +74,17 @@ jobs:
             rm -f .env
             mv -f /tmp/musicbot.env.new .env
 
-            echo '3. Stopping old services...'
-            ./stop.sh || true
+            echo '3. Setting executable permissions on scripts...'
+            chmod +x ./*.sh || true
 
-            echo '4. Compiling release binary...'
-            ./build.sh
+            echo '4. Stopping old services...'
+            bash ./stop.sh || true
 
-            echo '5. Starting services...'
-            ./start.sh
+            echo '5. Compiling release binary...'
+            bash ./build.sh
+
+            echo '6. Starting services...'
+            bash ./start.sh
 
             echo '=== Deployment Succeeded! ==='
           "
