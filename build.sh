@@ -21,6 +21,13 @@ if [ -f "$ROOT_DIR/bot.pid" ]; then
     fi
 fi
 
+# Ensure Rust/Cargo toolchain is loaded (required for non-interactive SSH sessions)
+if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+fi
+export PATH="$HOME/.cargo/bin:$PATH"
+
 if [ "${1:-}" = "-Clean" ] || [ "${1:-}" = "--clean" ]; then
     echo "Cleaning build artifacts..."
     cargo clean

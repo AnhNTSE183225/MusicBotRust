@@ -62,6 +62,9 @@ jobs:
           SSHPASS="$SSH_PASSWORD" sshpass -e ssh -tt -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "
             set -ex
             echo '=== Starting Automated Deployment on Server ==='
+            [ -f \"\$HOME/.cargo/env\" ] && source \"\$HOME/.cargo/env\" || true
+            export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+
             cd ~/workspace/MusicBotRust || { echo 'Directory ~/workspace/MusicBotRust not found!'; exit 1; }
 
             echo '1. Cleaning local changes & hard-resetting to origin/main...'
