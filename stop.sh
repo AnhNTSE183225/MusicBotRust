@@ -48,6 +48,11 @@ if [ -n "$REMAINING_TS" ]; then
     done
 fi
 
+if command -v tailscale >/dev/null 2>&1; then
+    (sudo -n tailscale funnel reset 2>/dev/null || tailscale funnel reset 2>/dev/null) || true
+    (sudo -n tailscale serve reset 2>/dev/null || tailscale serve reset 2>/dev/null) || true
+fi
+
 # 3. Release port 8000 if bound
 if command -v fuser >/dev/null 2>&1; then
     fuser -k 8000/tcp >/dev/null 2>&1 || true

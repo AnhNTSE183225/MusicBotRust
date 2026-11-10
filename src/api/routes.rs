@@ -948,6 +948,98 @@ pub async fn remove_gemini_key(
 // Schedule & Guild Metadata
 // ---------------------------------------------------------------------------
 
+async fn fetch_guild_members_list(state: &AppState, gid: GuildId) -> Vec<ServerMember> {
+    let mut members = Vec::new();
+
+    // 1. Fetch live member list via Discord REST API (up to 1000 members)
+    match state.discord_http.get_guild_members(gid, Some(1000), None).await {
+        Ok(fetched) => {
+            for m in fetched {
+                if !m.user.bot {
+                    members.push(ServerMember {
+                        id: m.user.id.to_string(),
+                        name: m.nick.unwrap_or(m.user.name),
+                        avatar: m
+                            .user
+                            .avatar
+                            .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", m.user.id, a))
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            warn!("[API] Failed to fetch guild members via HTTP for guild {}: {}", gid, e);
+        }
+    }
+
+    // 2. Fallback to serenity cache if REST API had an error or returned empty
+    if members.is_empty() {
+        if let Some(guild) = state.serenity_cache.guild(gid) {
+            for (uid, m) in &guild.members {
+                if !m.user.bot {
+                    members.push(ServerMember {
+                        id: uid.to_string(),
+                        name: m.nick.clone().unwrap_or_else(|| m.user.name.clone()),
+                        avatar: m
+                            .user
+                            .avatar
+                            .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, a))
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+        }
+    }
+
+    members
+}
+
+async fn fetch_guild_voice_channels_list(state: &AppState, gid: GuildId) -> Vec<ServerChannel> {
+    let mut channels = Vec::new();
+
+    match state.discord_http.get_channels(gid).await {
+        Ok(fetched) => {
+            for ch in fetched {
+                if ch.kind == ChannelType::Voice || ch.kind == ChannelType::Stage {
+                    channels.push(ServerChannel {
+                        id: ch.id.to_string(),
+                        name: ch.name.clone(),
+                        r#type: if ch.kind == ChannelType::Stage {
+                            "stage".to_string()
+                        } else {
+                            "voice".to_string()
+                        },
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            warn!("[API] Failed to fetch channels via HTTP for guild {}: {}", gid, e);
+        }
+    }
+
+    if channels.is_empty() {
+        if let Some(guild) = state.serenity_cache.guild(gid) {
+            for (cid, ch) in &guild.channels {
+                if ch.kind == ChannelType::Voice || ch.kind == ChannelType::Stage {
+                    channels.push(ServerChannel {
+                        id: cid.to_string(),
+                        name: ch.name.clone(),
+                        r#type: if ch.kind == ChannelType::Stage {
+                            "stage".to_string()
+                        } else {
+                            "voice".to_string()
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    channels
+}
+
 pub async fn get_guild_members(
     Path(guild_id): Path<String>,
     headers: HeaderMap,
@@ -956,23 +1048,8 @@ pub async fn get_guild_members(
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let _ = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let mut members = Vec::new();
-
-    if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
-        for (uid, member) in &guild.members {
-            if !member.user.bot {
-                members.push(ServerMember {
-                    id: uid.to_string(),
-                    name: member.nick.clone().unwrap_or(member.user.name.clone()),
-                    avatar: member
-                        .user
-                        .avatar
-                        .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, a))
-                        .unwrap_or_default(),
-                });
-            }
-        }
-    }
+    let gid = GuildId::new(gid_u64);
+    let members = fetch_guild_members_list(&state, gid).await;
 
     Ok(Json(json!({ "members": members })))
 }
@@ -985,19 +1062,8 @@ pub async fn get_guild_channels(
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let _ = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let mut channels = Vec::new();
-
-    if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
-        for (cid, ch) in &guild.channels {
-            if ch.kind == ChannelType::Voice || ch.kind == ChannelType::Stage {
-                channels.push(ServerChannel {
-                    id: cid.to_string(),
-                    name: ch.name.clone(),
-                    r#type: if ch.kind == ChannelType::Stage { "stage".to_string() } else { "voice".to_string() },
-                });
-            }
-        }
-    }
+    let gid = GuildId::new(gid_u64);
+    let channels = fetch_guild_voice_channels_list(&state, gid).await;
 
     Ok(Json(json!({ "channels": channels })))
 }
@@ -1010,32 +1076,11 @@ pub async fn get_schedule(
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let _ = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
+    let gid = GuildId::new(gid_u64);
 
     let events = db::get_schedule_events(&state.pool, &guild_id).await;
-    let mut members = Vec::new();
-    let mut channels = Vec::new();
-
-    if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
-        for (uid, m) in &guild.members {
-            if !m.user.bot {
-                members.push(ServerMember {
-                    id: uid.to_string(),
-                    name: m.nick.clone().unwrap_or(m.user.name.clone()),
-                    avatar: m.user.avatar.map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, a)).unwrap_or_default(),
-                });
-            }
-        }
-
-        for (cid, ch) in &guild.channels {
-            if ch.kind == ChannelType::Voice || ch.kind == ChannelType::Stage {
-                channels.push(ServerChannel {
-                    id: cid.to_string(),
-                    name: ch.name.clone(),
-                    r#type: if ch.kind == ChannelType::Stage { "stage".to_string() } else { "voice".to_string() },
-                });
-            }
-        }
-    }
+    let members = fetch_guild_members_list(&state, gid).await;
+    let channels = fetch_guild_voice_channels_list(&state, gid).await;
 
     Ok(Json(json!({
         "events": events,

@@ -8,7 +8,7 @@ on:
 
 jobs:
   deploy:
-    if: false # Toggled OFF
+    if: true # Toggled ON
     runs-on: ubuntu-latest
     steps:
       - name: Connect to Tailscale
