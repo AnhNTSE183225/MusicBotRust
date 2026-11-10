@@ -20,7 +20,7 @@ use crate::db;
 use crate::models::{
     AIAutoQueueConfig, AIBatchConfirmRequest, AISearchRequest, AddPlaylistRequest, AddSongRequest,
     ContributeKeyRequest, DiscordGuild, DiscordUser, GuildSession,
-    IndexRequest, PlaylistPreviewRequest, ScheduleEvent,
+    IndexRequest, PlaylistPreviewRequest,
     ServerChannel, ServerMember, Song, UserSession, VolumeRequest,
 };
 
@@ -392,11 +392,22 @@ pub async fn add_song(
 
     ensure_voice_connected(&state, &session.user.id, gid_u64).await?;
 
+    let requester_name = session
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| session.user.username.clone());
+    let requester_avatar = session
+        .user
+        .avatar
+        .as_ref()
+        .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", session.user.id, a));
+
     let song = match crate::services::youtube::extract_song_metadata(
         &req.url,
         Some(session.user.id.clone()),
-        Some(session.user.username.clone()),
-        session.user.avatar.map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", session.user.id, a)),
+        Some(requester_name),
+        requester_avatar,
     )
     .await
     {
@@ -589,7 +600,11 @@ pub async fn get_lyrics(
     };
 
     let artist = current.artist.unwrap_or_default();
-    let lyrics = state.lyrics_svc.get_lyrics(&current.title, &artist, current.duration).await;
+    let video_id = crate::services::lyrics::extract_video_id(&current.url);
+    let lyrics = state
+        .lyrics_svc
+        .get_lyrics(&current.title, &artist, current.duration, video_id.as_deref())
+        .await;
     Ok(Json(json!({ "lyrics": lyrics })))
 }
 
@@ -626,6 +641,17 @@ pub async fn playlist_add(
 
     ensure_voice_connected(&state, &session.user.id, gid_u64).await?;
 
+    let requester_name = session
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| session.user.username.clone());
+    let requester_avatar = session
+        .user
+        .avatar
+        .as_ref()
+        .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", session.user.id, a));
+
     let mut songs = Vec::new();
     if let Some(track_reqs) = req.tracks {
         let start = req.start_index.unwrap_or(1).max(1) as usize;
@@ -641,9 +667,9 @@ pub async fn playlist_add(
                     thumbnail: t.thumbnail,
                     duration: t.duration.unwrap_or(0.0),
                     requester_id: Some(session.user.id.clone()),
-                    requester_name: Some(session.user.username.clone()),
-                    requester_avatar: session.user.avatar.clone(),
-                    requester_handle: None,
+                    requester_name: Some(requester_name.clone()),
+                    requester_avatar: requester_avatar.clone(),
+                    requester_handle: Some(requester_name.clone()),
                     queue_id: Some(uuid::Uuid::new_v4().to_string()),
                 });
             }
@@ -666,9 +692,9 @@ pub async fn playlist_add(
                     thumbnail: Some(t.thumbnail),
                     duration: t.duration,
                     requester_id: Some(session.user.id.clone()),
-                    requester_name: Some(session.user.username.clone()),
-                    requester_avatar: session.user.avatar.clone(),
-                    requester_handle: None,
+                    requester_name: Some(requester_name.clone()),
+                    requester_avatar: requester_avatar.clone(),
+                    requester_handle: Some(requester_name.clone()),
                     queue_id: Some(uuid::Uuid::new_v4().to_string()),
                 });
             }
@@ -747,6 +773,17 @@ pub async fn ai_confirm_batch(
 
     ensure_voice_connected(&state, &session.user.id, gid_u64).await?;
 
+    let requester_name = session
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| session.user.username.clone());
+    let requester_avatar = session
+        .user
+        .avatar
+        .as_ref()
+        .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", session.user.id, a));
+
     let songs: Vec<Song> = req
         .songs
         .into_iter()
@@ -757,9 +794,9 @@ pub async fn ai_confirm_batch(
             thumbnail: s.thumbnail,
             duration: s.duration.unwrap_or(0.0),
             requester_id: Some(session.user.id.clone()),
-            requester_name: Some(session.user.username.clone()),
-            requester_avatar: session.user.avatar.clone(),
-            requester_handle: None,
+            requester_name: Some(requester_name.clone()),
+            requester_avatar: requester_avatar.clone(),
+            requester_handle: Some(requester_name.clone()),
             queue_id: Some(uuid::Uuid::new_v4().to_string()),
         })
         .collect();
@@ -1012,17 +1049,25 @@ pub async fn create_schedule(
     headers: HeaderMap,
     Query(q): Query<AuthQuery>,
     State(state): State<AppState>,
-    Json(payload): Json<ScheduleEvent>,
+    Json(payload): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let session = extract_session(&headers, Some(&q), &state).await?;
-    let avatar = session.user.avatar.map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", session.user.id, a));
+    let avatar = session
+        .user
+        .avatar
+        .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", session.user.id, a));
+    let organizer_name = session
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| session.user.username.clone());
 
     match db::create_schedule_event(
         &state.pool,
         &guild_id,
         payload,
         &session.user.id,
-        &session.user.username,
+        &organizer_name,
         avatar.as_deref(),
     )
     .await

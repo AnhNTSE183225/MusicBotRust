@@ -49,6 +49,16 @@ foreach ($p in $lingering) {
     $stopped = $true
 }
 
+# Stop Tailscale Funnel if active
+if (Get-Command tailscale -ErrorAction SilentlyContinue) {
+    $funnelStatus = (& tailscale funnel status 2>&1 | Out-String).Trim()
+    if ($funnelStatus -match "(?:8000|https://)") {
+        Write-Host "Resetting Tailscale Funnel on port 8000..." -ForegroundColor Yellow
+        & tailscale funnel reset 2>&1 | Out-Null
+        Write-Host "Tailscale Funnel stopped." -ForegroundColor Green
+    }
+}
+
 Write-Host ""
 Write-Host "OK: MusicBot services stopped." -ForegroundColor Green
 Write-Host ""

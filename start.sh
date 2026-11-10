@@ -70,3 +70,39 @@ fi
 
 echo "OK: MusicBot started in background (PID $BOT_PID) on port 8000!"
 echo "Log: $RUNNER_LOG"
+
+# 5. Starting Tailscale Funnel in Background
+TS_PID_FILE="$ROOT_DIR/tailscale_funnel.pid"
+TS_LOG_FILE="$ROOT_DIR/logs/tailscale_funnel.log"
+TS_RUNNING=false
+if [ -f "$TS_PID_FILE" ]; then
+    TS_PID=$(cat "$TS_PID_FILE" 2>/dev/null || true)
+    if [ -n "$TS_PID" ] && kill -0 "$TS_PID" 2>/dev/null; then
+        TS_RUNNING=true
+    fi
+fi
+
+if [ "$TS_RUNNING" = false ]; then
+    ACTIVE_TS_PID=$(pgrep -f "tailscale funnel.*8000" | head -n 1 || true)
+    if [ -n "$ACTIVE_TS_PID" ]; then
+        echo "$ACTIVE_TS_PID" > "$TS_PID_FILE"
+        TS_RUNNING=true
+    fi
+fi
+
+if [ "$TS_RUNNING" = true ]; then
+    echo "Tailscale Funnel is already running (PID $(cat "$TS_PID_FILE" 2>/dev/null))."
+else
+    if command -v tailscale >/dev/null 2>&1; then
+        echo "Starting Tailscale Funnel on port 8000..."
+        sudo -n -v 2>/dev/null || true
+        (sudo -n tailscale funnel 8000 2>/dev/null || tailscale funnel 8000) > "$TS_LOG_FILE" 2>&1 &
+        TS_SUB_PID=$!
+        sleep 1
+        ACTUAL_TS_PID=$(pgrep -f "tailscale funnel.*8000" | head -n 1 || true)
+        echo "${ACTUAL_TS_PID:-$TS_SUB_PID}" > "$TS_PID_FILE"
+        echo "Tailscale funnel started! Logs are in $TS_LOG_FILE"
+    fi
+fi
+
+echo "All services started successfully in the background!"

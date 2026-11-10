@@ -25,4 +25,32 @@ fi
 # Fallback: kill lingering musicbot binaries
 pkill -f "$ROOT_DIR/target/release/musicbot" 2>/dev/null || true
 
+# 2. Stop Tailscale Funnel if active
+TS_PID_FILE="$ROOT_DIR/tailscale_funnel.pid"
+sudo -n -v 2>/dev/null || true
+if [ -f "$TS_PID_FILE" ]; then
+    TS_PID=$(cat "$TS_PID_FILE" 2>/dev/null || true)
+    if [ -n "$TS_PID" ]; then
+        echo "Stopping Tailscale Funnel (PID $TS_PID)..."
+        kill -9 "$TS_PID" 2>/dev/null || sudo -n kill -9 "$TS_PID" 2>/dev/null || true
+        echo "Tailscale Funnel stopped."
+    fi
+    rm -f "$TS_PID_FILE"
+fi
+
+# Fallback: check for any lingering tailscale funnel processes
+REMAINING_TS=$(ps -ef | grep '[t]ailscale funnel.*8000' | awk '{print $2}' || true)
+if [ -n "$REMAINING_TS" ]; then
+    for pid in $REMAINING_TS; do
+        if [ "$pid" != "$$" ]; then
+            kill -9 "$pid" 2>/dev/null || sudo -n kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+fi
+
+# 3. Release port 8000 if bound
+if command -v fuser >/dev/null 2>&1; then
+    fuser -k 8000/tcp >/dev/null 2>&1 || true
+fi
+
 echo "OK: MusicBot services stopped."

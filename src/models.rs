@@ -212,37 +212,54 @@ pub struct ScheduleEventRecurrence {
     pub count: Option<i32>,
 }
 
+fn default_duration() -> i32 {
+    60
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_empty_json() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleEvent {
+    #[serde(default)]
     pub id: String,
-    #[serde(rename = "guildId")]
+    #[serde(default, rename = "guildId")]
     pub guild_id: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub description: String,
     pub category: Option<String>,
+    #[serde(default)]
     pub start: String,
-    #[serde(rename = "durationMinutes")]
+    #[serde(default = "default_duration", rename = "durationMinutes")]
     pub duration_minutes: i32,
     pub recurrence: Option<ScheduleEventRecurrence>,
     pub location: Option<ScheduleEventLocation>,
     #[serde(rename = "imageUrl")]
     pub image_url: Option<String>,
+    #[serde(default)]
     pub links: Vec<ScheduleEventLink>,
-    #[serde(rename = "organizerId")]
+    #[serde(default, rename = "organizerId")]
     pub organizer_id: String,
     #[serde(rename = "organizerName")]
     pub organizer_name: Option<String>,
     #[serde(rename = "organizerAvatar")]
     pub organizer_avatar: Option<String>,
-    #[serde(rename = "inviteEveryone")]
+    #[serde(default = "default_true", rename = "inviteEveryone")]
     pub invite_everyone: bool,
-    #[serde(rename = "inviteeIds")]
+    #[serde(default, rename = "inviteeIds")]
     pub invitee_ids: Vec<String>,
-    #[serde(rename = "seriesResponses")]
+    #[serde(default = "default_empty_json", rename = "seriesResponses")]
     pub series_responses: serde_json::Value,
-    #[serde(rename = "occurrenceResponses")]
+    #[serde(default = "default_empty_json", rename = "occurrenceResponses")]
     pub occurrence_responses: serde_json::Value,
-    #[serde(rename = "cancelledOccurrences")]
+    #[serde(default, rename = "cancelledOccurrences")]
     pub cancelled_occurrences: Vec<String>,
     #[serde(rename = "createdAt")]
     pub created_at: Option<f64>,

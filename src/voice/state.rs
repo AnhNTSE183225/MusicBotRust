@@ -45,6 +45,20 @@ impl GuildMusicState {
         }
     }
 
+    fn normalize_song(song: &mut Song) {
+        if song.requester_handle.is_none() {
+            song.requester_handle = song.requester_name.clone();
+        }
+        if let (Some(av), Some(uid)) = (&song.requester_avatar, &song.requester_id) {
+            if !av.starts_with("http") && !av.starts_with('/') {
+                song.requester_avatar = Some(format!(
+                    "https://cdn.discordapp.com/avatars/{}/{}.png?size=64",
+                    uid, av
+                ));
+            }
+        }
+    }
+
     pub async fn to_response(&self, bot_connected: bool) -> QueueStateResponse {
         let mut position = 0.0;
         let mut is_paused = self.is_paused;
@@ -56,9 +70,19 @@ impl GuildMusicState {
             }
         }
 
+        let mut queue = self.queue.clone();
+        for song in &mut queue {
+            Self::normalize_song(song);
+        }
+
+        let mut current = self.current_song.clone();
+        if let Some(song) = &mut current {
+            Self::normalize_song(song);
+        }
+
         QueueStateResponse {
-            queue: self.queue.clone(),
-            current: self.current_song.clone(),
+            queue,
+            current,
             queue_index: self.queue_index,
             volume: (self.volume * 100.0).round() as i32,
             loop_enabled: self.loop_enabled,

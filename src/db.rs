@@ -531,28 +531,33 @@ fn parse_schedule_row(r: &sqlx::sqlite::SqliteRow) -> Option<ScheduleEvent> {
 pub async fn create_schedule_event(
     pool: &SqlitePool,
     guild_id: &str,
-    mut payload: ScheduleEvent,
+    data: serde_json::Value,
     organizer_id: &str,
     organizer_name: &str,
     organizer_avatar: Option<&str>,
 ) -> Result<ScheduleEvent, sqlx::Error> {
     let now = now_sec();
-    let event_id = uuid::Uuid::new_v4().to_string();
-    payload.id = event_id.clone();
-    payload.guild_id = guild_id.to_string();
-    payload.organizer_id = organizer_id.to_string();
-    payload.organizer_name = Some(organizer_name.to_string());
-    payload.organizer_avatar = organizer_avatar.map(|s| s.to_string());
-    payload.created_at = Some(now);
-    payload.updated_at = Some(now);
+    let event_id = format!("ev-{:x}", (now * 1000.0) as u64);
 
-    let rec_json = payload.recurrence.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default());
-    let loc_json = payload.location.as_ref().map(|l| serde_json::to_string(l).unwrap_or_default());
-    let links_json = serde_json::to_string(&payload.links).unwrap_or_default();
-    let invitees_json = serde_json::to_string(&payload.invitee_ids).unwrap_or_default();
-    let series_json = serde_json::to_string(&payload.series_responses).unwrap_or_default();
-    let occ_json = serde_json::to_string(&payload.occurrence_responses).unwrap_or_default();
-    let canc_json = serde_json::to_string(&payload.cancelled_occurrences).unwrap_or_default();
+    let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let description = data.get("description").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("other").trim().to_string();
+    let start = data.get("start").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let duration_minutes = data.get("durationMinutes").and_then(|v| v.as_i64()).unwrap_or(60) as i32;
+    let rec_json = data.get("recurrence").filter(|v| !v.is_null()).map(|r| serde_json::to_string(r).unwrap_or_default());
+    let loc_json = data.get("location").filter(|v| !v.is_null()).map(|l| serde_json::to_string(l).unwrap_or_default());
+    let image_url = data.get("imageUrl").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let links_json = data.get("links").filter(|v| !v.is_null()).map(|l| serde_json::to_string(l).unwrap_or_default()).unwrap_or_else(|| "[]".to_string());
+    let invite_everyone = if data.get("inviteEveryone").and_then(|v| v.as_bool()).unwrap_or(true) { 1 } else { 0 };
+    let invitees_json = data.get("inviteeIds").filter(|v| !v.is_null()).map(|i| serde_json::to_string(i).unwrap_or_default()).unwrap_or_else(|| "[]".to_string());
+
+    // The organizer automatically accepts their own series
+    let series_responses = serde_json::json!({
+        organizer_id: "accepted"
+    });
+    let series_json = serde_json::to_string(&series_responses).unwrap_or_default();
+    let occ_json = "{}".to_string();
+    let canc_json = "[]".to_string();
 
     sqlx::query(
         r#"
@@ -563,19 +568,19 @@ pub async fn create_schedule_event(
     )
     .bind(&event_id)
     .bind(guild_id)
-    .bind(&payload.title)
-    .bind(&payload.description)
-    .bind(payload.category.as_deref().unwrap_or("other"))
-    .bind(&payload.start)
-    .bind(payload.duration_minutes)
+    .bind(&title)
+    .bind(&description)
+    .bind(&category)
+    .bind(&start)
+    .bind(duration_minutes)
     .bind(rec_json)
     .bind(loc_json)
-    .bind(&payload.image_url)
+    .bind(&image_url)
     .bind(links_json)
     .bind(organizer_id)
     .bind(organizer_name)
     .bind(organizer_avatar)
-    .bind(if payload.invite_everyone { 1 } else { 0 })
+    .bind(invite_everyone)
     .bind(invitees_json)
     .bind(series_json)
     .bind(occ_json)
@@ -585,7 +590,11 @@ pub async fn create_schedule_event(
     .execute(pool)
     .await?;
 
-    Ok(payload)
+    let event = get_schedule_event(pool, &event_id)
+        .await
+        .ok_or(sqlx::Error::RowNotFound)?;
+
+    Ok(event)
 }
 
 pub async fn update_schedule_event(

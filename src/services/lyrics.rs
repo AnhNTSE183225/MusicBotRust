@@ -38,6 +38,61 @@ pub struct LyricsService {
     cache: Arc<Mutex<HashMap<String, (FormattedLyrics, f64)>>>,
 }
 
+pub fn extract_video_id(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.len() == 11 && trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Some(trimmed.to_string());
+    }
+    let re = regex::Regex::new(r"(?:v=|/|youtu\.be/|embed/|shorts/)([0-9A-Za-z_-]{11})(?:[&?/\b]|$)").ok()?;
+    re.captures(trimmed).and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+}
+
+pub async fn get_sponsorblock_intro_offset(client: &Client, video_id: &str) -> Option<f64> {
+    if video_id.is_empty() {
+        return None;
+    }
+    let encoded_id = url::form_urlencoded::byte_serialize(video_id.as_bytes()).collect::<String>();
+    let url = format!(
+        "https://sponsor.ajay.app/api/skipSegments?videoID={}&categories=[%22music_offtopic%22]",
+        encoded_id
+    );
+
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.get(&url).header("User-Agent", "MusicBot/1.0").send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    if !res.status().is_success() {
+        return None;
+    }
+
+    let val = res.json::<serde_json::Value>().await.ok()?;
+    if let Some(arr) = val.as_array() {
+        for seg_obj in arr {
+            if let Some(seg) = seg_obj.get("segment").and_then(|s| s.as_array()) {
+                if seg.len() >= 2 {
+                    let start = seg[0].as_f64().unwrap_or(0.0);
+                    let end = seg[1].as_f64().unwrap_or(0.0);
+                    if start <= 2.0 && end > start {
+                        tracing::info!(
+                            "[Lyrics] Found SponsorBlock MV intro segment for {}: {} -> {}",
+                            video_id,
+                            start,
+                            end
+                        );
+                        return Some((end * 100.0).round() / 100.0);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 impl LyricsService {
     pub fn new() -> Self {
         Self {
@@ -49,8 +104,19 @@ impl LyricsService {
         }
     }
 
-    pub async fn get_lyrics(&self, title: &str, artist: &str, duration: f64) -> Option<FormattedLyrics> {
-        let key = format!("{}:{}", title.trim().to_lowercase(), artist.trim().to_lowercase());
+    pub async fn get_lyrics(
+        &self,
+        title: &str,
+        artist: &str,
+        duration: f64,
+        video_id: Option<&str>,
+    ) -> Option<FormattedLyrics> {
+        let key = format!(
+            "{}:{}:{}",
+            video_id.unwrap_or(""),
+            title.trim().to_lowercase(),
+            artist.trim().to_lowercase()
+        );
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
 
         {
@@ -79,36 +145,48 @@ impl LyricsService {
             duration as i64
         );
 
+        let mut found_lyrics = None;
+
         if let Ok(res) = self.client.get(&url).send().await {
             if res.status().is_success() {
                 if let Ok(val) = res.json::<serde_json::Value>().await {
                     if let Some(parsed) = Self::extract_lyrics_from_json(&val) {
-                        let mut cache = self.cache.lock().await;
-                        cache.insert(key.clone(), (parsed.clone(), now));
-                        return Some(parsed);
+                        found_lyrics = Some(parsed);
                     }
                 }
             }
         }
 
         // Fallback search
-        let search_url = format!(
-            "https://lrclib.net/api/search?q={}",
-            url::form_urlencoded::byte_serialize(format!("{} {}", clean_title, artist).as_bytes()).collect::<String>()
-        );
+        if found_lyrics.is_none() {
+            let search_url = format!(
+                "https://lrclib.net/api/search?q={}",
+                url::form_urlencoded::byte_serialize(format!("{} {}", clean_title, artist).as_bytes()).collect::<String>()
+            );
 
-        if let Ok(res) = self.client.get(&search_url).send().await {
-            if res.status().is_success() {
-                if let Ok(items) = res.json::<Vec<serde_json::Value>>().await {
-                    for item in items.iter().take(3) {
-                        if let Some(parsed) = Self::extract_lyrics_from_json(item) {
-                            let mut cache = self.cache.lock().await;
-                            cache.insert(key, (parsed.clone(), now));
-                            return Some(parsed);
+            if let Ok(res) = self.client.get(&search_url).send().await {
+                if res.status().is_success() {
+                    if let Ok(items) = res.json::<Vec<serde_json::Value>>().await {
+                        for item in items.iter().take(3) {
+                            if let Some(parsed) = Self::extract_lyrics_from_json(item) {
+                                found_lyrics = Some(parsed);
+                                break;
+                            }
                         }
                     }
                 }
             }
+        }
+
+        if let Some(mut parsed) = found_lyrics {
+            if let Some(vid) = video_id {
+                if let Some(offset) = get_sponsorblock_intro_offset(&self.client, vid).await {
+                    parsed.intro_offset = Some(offset);
+                }
+            }
+            let mut cache = self.cache.lock().await;
+            cache.insert(key, (parsed.clone(), now));
+            return Some(parsed);
         }
 
         None

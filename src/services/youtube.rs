@@ -28,6 +28,75 @@ pub fn build_yt_music_search_url(query: &str) -> String {
     )
 }
 
+async fn fetch_direct_metadata(
+    target: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let output = Command::new("yt-dlp")
+        .arg("--dump-json")
+        .arg("--no-playlist")
+        .args(["--extractor-args", "youtube:player_client=android,ios,mweb,web"])
+        .arg(target)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("yt-dlp metadata extraction failed: {}", err).into());
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&json_str)?;
+    Ok(val)
+}
+
+async fn search_yt_music(query: &str) -> Option<String> {
+    let ytm_url = build_yt_music_search_url(query);
+    let fut = async {
+        let output = Command::new("yt-dlp")
+            .arg("--dump-single-json")
+            .arg("--flat-playlist")
+            .args(["--playlist-end", "5"])
+            .arg("--no-warnings")
+            .arg(&ytm_url)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let json_str = String::from_utf8_lossy(&output.stdout);
+        let val: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+        let entries = val.get("entries")?.as_array()?;
+
+        for e in entries {
+            let u = e.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+            if u.contains("/browse/") {
+                continue;
+            }
+            if let Some(id) = e.get("id").and_then(|v| v.as_str()) {
+                if !id.is_empty() {
+                    return Some(format!("https://www.youtube.com/watch?v={}", id));
+                }
+            }
+            if u.contains("watch?v=") || u.contains("youtu.be/") {
+                return Some(u.to_string());
+            }
+        }
+        None
+    };
+
+    tokio::time::timeout(tokio::time::Duration::from_secs(6), fut)
+        .await
+        .ok()
+        .flatten()
+}
+
 pub async fn extract_song_metadata(
     query: &str,
     requester_id: Option<String>,
@@ -37,73 +106,15 @@ pub async fn extract_song_metadata(
     let clean = sanitize_query(query);
 
     let val = if is_youtube_link(&clean) {
-        let output = Command::new("yt-dlp")
-            .arg("--dump-json")
-            .arg("--no-playlist")
-            .args(["--extractor-args", "youtube:player_client=android,ios,mweb,web"])
-            .arg(&clean)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("yt-dlp metadata extraction failed: {}", err).into());
-        }
-
-        let json_str = String::from_utf8_lossy(&output.stdout);
-        serde_json::from_str::<serde_json::Value>(&json_str)?
+        fetch_direct_metadata(&clean).await?
     } else {
-        // 1. Prioritize YouTube Music with '#songs' tab filter (official songs vs M/Vs)
-        let ytm_url = build_yt_music_search_url(&clean);
-        let ytm_res = Command::new("yt-dlp")
-            .arg("--dump-json")
-            .arg("--no-playlist")
-            .arg(&ytm_url)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        // 1. Prioritize YouTube Music with '#songs' tab filter (official studio songs vs M/Vs)
+        let resolved_target = match search_yt_music(&clean).await {
+            Some(url) => url,
+            None => format!("ytsearch1:{}", clean),
+        };
 
-        let mut parsed_val = None;
-        if let Ok(output) = ytm_res {
-            if output.status.success() {
-                let stdout_str = String::from_utf8_lossy(&output.stdout);
-                if let Ok(json_obj) = serde_json::from_str::<serde_json::Value>(&stdout_str) {
-                    if json_obj.get("title").is_some() || json_obj.get("id").is_some() {
-                        parsed_val = Some(json_obj);
-                    }
-                }
-            }
-        }
-
-        // 2. Fallback to standard YouTube search if YouTube Music had no results
-        match parsed_val {
-            Some(v) => v,
-            None => {
-                let target = format!("ytsearch1:{}", clean);
-                let fallback_output = Command::new("yt-dlp")
-                    .arg("--dump-json")
-                    .arg("--no-playlist")
-                    .args(["--extractor-args", "youtube:player_client=android,ios,mweb,web"])
-                    .arg("--default-search")
-                    .arg("ytsearch")
-                    .arg(&target)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .await?;
-
-                if !fallback_output.status.success() {
-                    let err = String::from_utf8_lossy(&fallback_output.stderr);
-                    return Err(format!("yt-dlp search failed: {}", err).into());
-                }
-
-                let json_str = String::from_utf8_lossy(&fallback_output.stdout);
-                serde_json::from_str::<serde_json::Value>(&json_str)?
-            }
-        }
+        fetch_direct_metadata(&resolved_target).await?
     };
 
     let title = val.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown Title").to_string();
@@ -126,9 +137,9 @@ pub async fn extract_song_metadata(
         thumbnail,
         duration,
         requester_id,
+        requester_handle: requester_name.clone(),
         requester_name,
         requester_avatar,
-        requester_handle: None,
         queue_id: Some(uuid::Uuid::new_v4().to_string()),
     })
 }

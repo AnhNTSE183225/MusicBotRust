@@ -229,7 +229,7 @@ impl VoiceManager {
                 "-o",
                 "-",
                 "-f",
-                "ba/b",
+                "ba[acodec=opus]/ba[ext=m4a]/ba/bestaudio/best",
                 "--no-warnings",
                 &song.url,
             ])
@@ -243,6 +243,7 @@ impl VoiceManager {
             .args([
                 "-v",
                 "warning",
+                "-vn",
                 "-i",
                 "pipe:0",
                 "-f",
@@ -258,9 +259,47 @@ impl VoiceManager {
             .stderr(std::process::Stdio::null())
             .spawn()?;
 
-        let container = songbird::input::ChildContainer::from(vec![ytdl, ffmpeg]);
+        let mut container = songbird::input::ChildContainer::from(vec![ytdl, ffmpeg]);
+
+        // Pre-buffer ~0.5s of audio (192,000 bytes of f32le stereo 48kHz PCM) in a worker thread
+        // before attaching to the Songbird mixer. This eliminates mixer thread blocking on yt-dlp startup,
+        // clock-skew frame drops, and prevents the initial 5 seconds from skipping in Discord.
+        let (initial_bytes, container) = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut initial = Vec::with_capacity(192_000);
+            let mut temp_buf = [0u8; 16384];
+            while initial.len() < 192_000 {
+                match container.read(&mut temp_buf) {
+                    Ok(0) => break,
+                    Ok(n) => initial.extend_from_slice(&temp_buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        warn!("[Voice] Error pre-buffering audio: {}", e);
+                        break;
+                    }
+                }
+            }
+            (initial, container)
+        })
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        // Verify if playback state was cancelled/changed during pre-buffer
+        let state_arc = self.get_or_create_state(guild_id).await;
+        {
+            let state = state_arc.read().await;
+            if let Some(curr) = &state.current_song {
+                if curr.url != song.url {
+                    info!("[Voice] Song changed while pre-buffering '{}', abandoning stream", song.title);
+                    return Ok(());
+                }
+            }
+        }
+
+        use std::io::Read;
+        let reader = std::io::Cursor::new(initial_bytes).chain(container);
         let raw_adapter = songbird::input::RawAdapter::new(
-            symphonia::core::io::ReadOnlySource::new(container),
+            symphonia::core::io::ReadOnlySource::new(reader),
             48000,
             2,
         );
@@ -268,7 +307,7 @@ impl VoiceManager {
 
         let handle = {
             let mut handler = handler_lock.lock().await;
-            handler.play_input(input)
+            handler.play_only_input(input)
         };
 
         // Configure volume
@@ -333,7 +372,10 @@ impl VoiceManager {
                     if !songs.is_empty() {
                         let state_arc = mgr.get_or_create_state(guild_id).await;
                         let mut state = state_arc.write().await;
-                        for song in songs {
+                        for mut song in songs {
+                            song.requester_name = Some("AI Auto-Queue".to_string());
+                            song.requester_handle = Some("AI Auto-Queue".to_string());
+                            song.requester_avatar = Some("/logo_icon.svg".to_string());
                             state.queue.push(song);
                         }
                     }

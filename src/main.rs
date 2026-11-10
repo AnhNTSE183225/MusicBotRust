@@ -104,22 +104,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let router = api::create_router(app_state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("[Server] Failed to bind to http://{}: {}. (Port {} may already be in use)", addr, e, config.port);
+            return Err(e.into());
+        }
+    };
     info!("MusicBot HTTP Server running at http://{}", addr);
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    info!("MusicBot exited cleanly.");
+    info!("MusicBot HTTP server completed serving. Main exiting cleanly.");
     Ok(())
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => info!("[Shutdown] Ctrl+C signal received!"),
+            Err(err) => error!("[Shutdown] Failed to listen for Ctrl+C signal: {}", err),
+        }
     };
 
     #[cfg(unix)]
@@ -134,8 +141,12 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        _ = ctrl_c => {
+            info!("[Shutdown] Shutdown triggered via Ctrl+C");
+        },
+        _ = terminate => {
+            info!("[Shutdown] Shutdown triggered via SIGTERM");
+        },
     }
     info!("Shutdown signal received, shutting down gracefully...");
 }
