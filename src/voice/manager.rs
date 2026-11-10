@@ -225,7 +225,7 @@ impl VoiceManager {
         let mut ytdl = std::process::Command::new("yt-dlp")
             .args([
                 "--extractor-args",
-                "youtube:player_client=android",
+                "youtube:player_client=android,ios,mweb,web",
                 "-o",
                 "-",
                 "-f",
