@@ -2,4 +2,11 @@
 .env
 *.md
 .agent/
+.agents/
 .cursor/
+data/
+target/
+*.pid
+Cargo.lock
+logs/
+.harness/

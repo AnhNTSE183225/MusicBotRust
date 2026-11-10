@@ -1,0 +1,47 @@
+[package]
+name = "musicbot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async Runtime & HTTP API Layer
+tokio = { version = "1.40", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "fs"] }
+
+# Discord & Voice (Songbird + Serenity)
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "http", "model", "rustls_backend", "voice", "cache"] }
+songbird = { version = "0.6", default-features = false, features = ["serenity", "gateway", "driver", "rustls", "builtin-queue", "tungstenite"] }
+symphonia = { version = "0.5", features = ["all"] }
+
+# Database & Storage
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+
+# Serialization & JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Networking & Utilities
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+regex = "1.10"
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

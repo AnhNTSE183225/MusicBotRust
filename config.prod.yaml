@@ -1,0 +1,175 @@
+# MusicBot Configuration (Production Profile)
+
+# Runtime Profile
+runtime:
+  mode: "prod"
+
+# Discord Bot Settings
+discord:
+  command_prefix: "!"
+
+# Voice & Playback Settings
+playback:
+  default_volume: 1
+  connection_timeout: 10.0
+  connection_stabilize_delay: 1.5
+  debug_metrics: false
+  yt_stream_cache_ttl_seconds: 300
+  prebuffer_seconds: 1.5
+  log_buffer_metrics: false
+  normalize_audio: true
+  target_lufs: -16.0
+  true_peak: -1.5
+  loudness_range: 11.0
+
+# YouTube / YTDL Settings
+youtube:
+  playlist_confirmation_timeout: 60
+  max_playlist_items: 200
+  search_provider: "youtube_music"
+  detect_playlists: false
+  blacklist_patterns:
+    - "(?i)\\b9+\\s*[dđ](?:[oóòỏõọôồốổỗộơờớởỡợ])(?:[aáàảãạăằắẳẵặâầấẩẫậ])\\s*(?:h(?:[oóòỏõọôồốổỗộơờớởỡợ])(?:[aáàảãạăằắẳẵặâầấẩẫậ])\\s+)?h(?:[oóòỏõọôồốổỗộơờớởỡợ])ng\\b"
+    - "(?i)\\brap\\s*vi(?:e|ệ)t\\b"
+    - "(?i)\\bsi(?:e|ê)u\\s*h(?:a|à|á|ả|ã|ạ)i\\b"
+    - "(?i)\\bkawaii\\s*kutegomen\\b"
+    - "(?i)\\bkejo\\b"
+
+# Discord Message Settings
+message:
+  embed_char_limit: 2000
+  embed_buffer: 100
+  queue_items_per_page: 10
+  queue_paginator_timeout: 120
+
+# Resilience & Auto-Reconnect Settings
+resilience:
+  auto_reconnect: true
+  reconnect_delay_initial: 3.0
+  reconnect_delay_max: 60.0
+  voice_reconnect_attempts: 10
+  voice_reconnect_interval: 5.0
+  auto_resume_playback: true
+  auto_resume_max_age_seconds: 300
+
+# File Storage Settings
+storage:
+  log_file: "logs/musicbot.log"
+  log_level: "INFO"
+  state_file: "data/queue_state.json"
+  db_file: "data/musicbot.db"
+
+# YouTube Downloader Options
+ytdl_options:
+  format: "ba[acodec=opus][abr<=96]/ba[abr<=96]/ba[acodec=opus][abr<=128]/bestaudio/best"
+  noplaylist: true
+  quiet: true
+  no_warnings: true
+  default_search: "auto"
+  source_address: "0.0.0.0"
+  geo_bypass: true
+
+# FFmpeg Stream Options
+ffmpeg:
+  before_options: "-v warning -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -thread_queue_size 1024 -fflags +genpts"
+  audio_only: "-vn -ar 48000 -ac 2"
+
+# Command Permissions (2 roles: admin and non-admin)
+permissions:
+  commands:
+    help:
+      mode: "open"
+    join:
+      mode: "open"
+    yt:
+      mode: "open"
+    playlist:
+      mode: "open"
+    addplaylist:
+      mode: "open"
+    skip:
+      mode: "vote_if_non_admin"
+      vote:
+        threshold_type: "ratio"
+        threshold_value: 0.5
+        min_votes: 1
+        same_channel_only: true
+        force_vote_for_admin: false
+    stop:
+      mode: "open"
+    pause:
+      mode: "admin_only"
+    resume:
+      mode: "admin_only"
+    queue:
+      mode: "open"
+    current:
+      mode: "open"
+    loop:
+      mode: "admin_only"
+    skipto:
+      mode: "admin_only"
+    remove:
+      mode: "vote_if_non_admin"
+    clear:
+      mode: "admin_only"
+    volume:
+      mode: "admin_only"
+    normalize:
+      mode: "admin_only"
+    block:
+      mode: "admin_only"
+    unblock:
+      mode: "admin_only"
+    whitelist:
+      mode: "admin_only"
+    unwhitelist:
+      mode: "admin_only"
+    blacklist:
+      mode: "admin_only"
+    reload_blacklist:
+      mode: "admin_only"
+    ai_autoqueue:
+      mode: "open"
+      vote:
+        threshold_type: "ratio"
+        threshold_value: 0.5
+        min_votes: 1
+        same_channel_only: true
+        force_vote_for_admin: false
+
+# Server Event & Calendar Schedule Settings
+schedule:
+  reminder_lead_time_minutes: 15
+  announcement_channel: "general"
+  event_channel: "event"
+
+# API & Web UI Settings
+api:
+  host: "0.0.0.0"
+  port: 8000
+  frontend_url: "https://musicbotui.pages.dev"
+  discord_redirect_uri: "https://theanh.tail38dac5.ts.net/callback"
+  cors_origins:
+    - "https://musicbotui.pages.dev"
+    - "https://anhntse183225.github.io"
+
+# AI Service Settings
+ai:
+  model: "gemini-3.5-flash-lite"
+  candidate_multiplier: 2
+  temperature: 0.85
+  max_output_tokens: 2048
+  cooldown_hours: 6
+  min_view_count: 1000
+  score_penalties:
+    live: 0.1
+    lyrics: 0.15
+    vietsub: 0.15
+    karaoke: 0.05
+    remix: 0.2
+    acoustic: 0.25
+    cover: 0.1
+    speed_up: 0.05
+    slowed: 0.05
+    instrumental: 0.1
