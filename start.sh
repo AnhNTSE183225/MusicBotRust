@@ -35,7 +35,19 @@ if [ ! -f "$RELEASE_BIN" ]; then
     bash "$ROOT_DIR/build.sh"
 fi
 
-# 3. Load .env
+# 3. Ensure yt-dlp and runtime tools are available
+export PATH="$ROOT_DIR/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+if ! command -v yt-dlp >/dev/null 2>&1; then
+    mkdir -p "$ROOT_DIR/bin"
+    if [ ! -f "$ROOT_DIR/bin/yt-dlp" ]; then
+        echo "yt-dlp not found in PATH. Downloading standalone yt-dlp binary..."
+        curl -sL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o "$ROOT_DIR/bin/yt-dlp"
+        chmod +x "$ROOT_DIR/bin/yt-dlp"
+    fi
+    export PATH="$ROOT_DIR/bin:$PATH"
+fi
+
+# 4. Load .env
 if [ -f "$ROOT_DIR/.env" ]; then
     set -a
     # shellcheck disable=SC1091

@@ -80,19 +80,25 @@ impl VoiceManager {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn leave_channel(
         &self,
         guild_id: u64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("[Voice] Leaving guild {}", guild_id);
         self.stop(guild_id).await?;
-        let _ = self.songbird.leave(GuildId::new(guild_id)).await;
+        let gid = GuildId::new(guild_id);
+        let _ = self.songbird.leave(gid).await;
+        let _ = self.songbird.remove(gid).await;
         let state_arc = self.get_or_create_state(guild_id).await;
         let mut state = state_arc.write().await;
         state.channel_id = None;
         state.is_playing = false;
+        state.is_paused = false;
         state.track_handle = None;
+        state.current_song = None;
+        state.queue.clear();
+        state.queue_index = -1;
+        state.skip_votes.clear();
         Ok(())
     }
 

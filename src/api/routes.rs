@@ -526,7 +526,7 @@ pub async fn control_stop(
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let _ = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let _ = state.voice_mgr.stop(gid_u64).await;
+    let _ = state.voice_mgr.leave_channel(gid_u64).await;
     Ok(Json(json!({ "status": "success" })))
 }
 

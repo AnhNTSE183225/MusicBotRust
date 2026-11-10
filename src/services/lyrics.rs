@@ -211,17 +211,19 @@ impl LyricsService {
     }
 
     fn parse_lrc(lrc_text: &str, provider: &str) -> Option<FormattedLyrics> {
-        let re = regex::Regex::new(r"\[(\d{1,2}):(\d{2}(?:\.\d{1,3})?)\](.*)").ok()?;
+        let line_re = regex::Regex::new(r"\[(\d{1,2}):(\d{2}(?:\.\d{1,3})?)\](.*)").ok()?;
+        let word_re = regex::Regex::new(r"<(\d{1,2}):(\d{2}(?:\.\d{1,3})?)>([^<]*)").ok()?;
+        let tag_strip_re = regex::Regex::new(r"<[^>]+>").ok()?;
         let mut entries = Vec::new();
 
         for line in lrc_text.lines() {
             let line = line.trim();
-            if let Some(caps) = re.captures(line) {
+            if let Some(caps) = line_re.captures(line) {
                 let min: f64 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
                 let sec: f64 = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
-                let text = caps.get(3).map(|m| m.as_str().trim()).unwrap_or("");
-                if !text.is_empty() {
-                    entries.push((min * 60.0 + sec, text.to_string()));
+                let raw_text = caps.get(3).map(|m| m.as_str().trim()).unwrap_or("");
+                if !raw_text.is_empty() {
+                    entries.push((min * 60.0 + sec, raw_text.to_string()));
                 }
             }
         }
@@ -231,23 +233,65 @@ impl LyricsService {
         }
 
         let mut lines = Vec::new();
-        for (i, (sec, text)) in entries.iter().enumerate() {
+        let mut has_syllables = false;
+
+        for (i, (sec, raw_text)) in entries.iter().enumerate() {
             let end_sec = if i + 1 < entries.len() {
                 (entries[i + 1].0).min(sec + 8.0)
             } else {
                 sec + 5.0
             };
 
+            // Parse word/syllable-level timestamps if present (<mm:ss.xx>word)
+            let mut words = Vec::new();
+            for word_cap in word_re.captures_iter(raw_text) {
+                let w_min: f64 = word_cap.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
+                let w_sec: f64 = word_cap.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
+                let w_text = word_cap.get(3).map(|m| m.as_str()).unwrap_or("");
+                let clean_w_text = w_text.trim();
+                if !clean_w_text.is_empty() {
+                    words.push((w_min * 60.0 + w_sec, clean_w_text.to_string(), w_text.ends_with(' ')));
+                }
+            }
+
+            let word_models = if !words.is_empty() {
+                has_syllables = true;
+                let mut lyric_words = Vec::new();
+                for (j, (w_start, w_text, trailing_space)) in words.iter().enumerate() {
+                    let w_end = if j + 1 < words.len() {
+                        words[j + 1].0
+                    } else {
+                        end_sec
+                    };
+                    lyric_words.push(LyricWord {
+                        begin: (*w_start * 1000.0).round() / 1000.0,
+                        end: (w_end * 1000.0).round() / 1000.0,
+                        text: w_text.clone(),
+                        trailing_space: Some(*trailing_space),
+                    });
+                }
+                Some(lyric_words)
+            } else {
+                None
+            };
+
+            // Clean any <...> tags from line text
+            let clean_line_text = tag_strip_re.replace_all(raw_text, "").trim().to_string();
+
             lines.push(LyricLine {
                 begin: (*sec * 1000.0).round() / 1000.0,
                 end: (end_sec * 1000.0).round() / 1000.0,
-                text: text.clone(),
-                words: None,
+                text: clean_line_text,
+                words: word_models,
             });
         }
 
         Some(FormattedLyrics {
-            lyrics_type: "line".to_string(),
+            lyrics_type: if has_syllables {
+                "syllable".to_string()
+            } else {
+                "line".to_string()
+            },
             provider: provider.to_string(),
             intro_offset: None,
             lines,
