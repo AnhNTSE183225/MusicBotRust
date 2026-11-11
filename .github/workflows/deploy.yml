@@ -8,6 +8,7 @@ on:
 
 jobs:
   deploy:
+    if: false # Disable this workflow for now, as it is not yet ready for production use
     runs-on: ubuntu-latest
     steps:
       - name: Connect to Tailscale
