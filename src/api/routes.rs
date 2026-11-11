@@ -1107,6 +1107,39 @@ pub async fn create_schedule(
         .clone()
         .unwrap_or_else(|| session.user.username.clone());
 
+    // Validate that event start is not in the past
+    let start_str = payload
+        .get("start")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": "Missing start time for event" })),
+            )
+        })?;
+
+    let start_dt = chrono::DateTime::parse_from_rfc3339(start_str)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(start_str, "%Y-%m-%dT%H:%M:%S")
+                .map(|ndt| ndt.and_utc())
+        })
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": format!("Invalid start time format: {}", e) })),
+            )
+        })?;
+
+    let now = chrono::Utc::now();
+    // Allow 1 minute grace period for client clock skew or latency
+    if start_dt < now - chrono::Duration::minutes(1) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "Cannot schedule an event in the past." })),
+        ));
+    }
+
     match db::create_schedule_event(
         &state.pool,
         &guild_id,
@@ -1117,7 +1150,15 @@ pub async fn create_schedule(
     )
     .await
     {
-        Ok(ev) => Ok(Json(json!({ "status": "ok", "event": ev }))),
+        Ok(ev) => {
+            let svc = state.schedule_svc.clone();
+            let ev_clone = ev.clone();
+            tokio::spawn(async move {
+                svc.send_event_invitations(&ev_clone, None).await;
+            });
+
+            Ok(Json(json!({ "status": "ok", "event": ev })))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "detail": format!("Failed to create schedule: {}", e) })),
@@ -1135,8 +1176,35 @@ pub async fn update_schedule(
     let session = extract_session(&headers, Some(&q), &state).await?;
     let is_admin = session.user.id == state.config.admin_user_id;
 
+    // If start time is being modified, ensure it's not set to the past
+    if let Some(start_str) = payload.get("start").and_then(|v| v.as_str()) {
+        if let Ok(start_dt) = chrono::DateTime::parse_from_rfc3339(start_str) {
+            let now = chrono::Utc::now();
+            if start_dt.with_timezone(&chrono::Utc) < now - chrono::Duration::minutes(1) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": "Cannot reschedule an event to a past date or time." })),
+                ));
+            }
+        }
+    }
+
+    let existing = db::get_schedule_event(&state.pool, &event_id).await;
+
     match db::update_schedule_event(&state.pool, &event_id, &payload, &session.user.id, is_admin).await {
-        Ok(Some(ev)) => Ok(Json(json!({ "status": "ok", "event": ev }))),
+        Ok(Some(ev)) => {
+            if let Some(old_ev) = existing {
+                let svc = state.schedule_svc.clone();
+                let old_clone = old_ev;
+                let updated_clone = ev.clone();
+                let editor_id = session.user.id.clone();
+                tokio::spawn(async move {
+                    svc.send_event_update_notifications(&old_clone, &updated_clone, Some(&editor_id)).await;
+                });
+            }
+
+            Ok(Json(json!({ "status": "ok", "event": ev })))
+        }
         Ok(None) => Err((StatusCode::NOT_FOUND, Json(json!({ "detail": "Event not found" })))),
         Err(e) => Err((StatusCode::FORBIDDEN, Json(json!({ "detail": e.to_string() })))),
     }

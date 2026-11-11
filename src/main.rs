@@ -80,8 +80,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
 
     let lyrics_svc = Arc::new(LyricsService::new());
-    let schedule_svc = Arc::new(ScheduleService::new(pool.clone(), discord_http.clone()));
-    schedule_svc.start_background_loop();
+    let schedule_svc = Arc::new(ScheduleService::new(
+        pool.clone(),
+        discord_http.clone(),
+        config.frontend_url.clone(),
+    ));
+    schedule_svc.clone().start_background_loop();
 
     // 6. Spawn Discord Gateway Task in Background
     tokio::spawn(async move {
@@ -96,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         pool,
         voice_mgr,
         lyrics_svc,
+        schedule_svc,
         http_client: reqwest::Client::builder().build().unwrap_or_default(),
         discord_http,
         serenity_cache,

@@ -736,3 +736,48 @@ pub async fn respond_schedule_event(
 
     get_schedule_event(pool, event_id).await
 }
+
+pub async fn get_all_active_schedule_events(pool: &SqlitePool) -> Vec<ScheduleEvent> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, guild_id, title, description, category, start, duration_minutes, recurrence_json, location_json, image_url, links_json, organizer_id, organizer_name, organizer_avatar, invite_everyone, invitee_ids_json, series_responses_json, occurrence_responses_json, cancelled_occurrences_json, created_at, updated_at
+        FROM guild_schedule_events
+        ORDER BY start ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    rows.iter().filter_map(parse_schedule_row).collect()
+}
+
+pub async fn is_occurrence_reminded(pool: &SqlitePool, event_id: &str, occurrence_key: &str, reminder_type: &str) -> bool {
+    sqlx::query("SELECT 1 FROM guild_schedule_reminders WHERE event_id = ? AND occurrence_key = ? AND reminder_type = ?")
+        .bind(event_id)
+        .bind(occurrence_key)
+        .bind(reminder_type)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None)
+        .is_some()
+}
+
+pub async fn mark_occurrence_reminded(pool: &SqlitePool, event_id: &str, occurrence_key: &str, reminder_type: &str) {
+    let now = now_sec();
+    let _ = sqlx::query("INSERT OR REPLACE INTO guild_schedule_reminders (event_id, occurrence_key, reminder_type, reminded_at) VALUES (?, ?, ?, ?)")
+        .bind(event_id)
+        .bind(occurrence_key)
+        .bind(reminder_type)
+        .bind(now)
+        .execute(pool)
+        .await;
+}
+
+pub async fn clear_event_reminders(pool: &SqlitePool, event_id: &str) {
+    let _ = sqlx::query("DELETE FROM guild_schedule_reminders WHERE event_id = ?")
+        .bind(event_id)
+        .execute(pool)
+        .await;
+}
+

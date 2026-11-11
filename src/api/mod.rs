@@ -13,6 +13,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use crate::config::AppConfig;
 use crate::services::lyrics::LyricsService;
+use crate::services::schedule::ScheduleService;
 use crate::voice::manager::VoiceManager;
 
 #[derive(Clone)]
@@ -21,8 +22,8 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub voice_mgr: Arc<VoiceManager>,
     pub lyrics_svc: Arc<LyricsService>,
+    pub schedule_svc: Arc<ScheduleService>,
     pub http_client: Client,
-    #[allow(dead_code)]
     pub discord_http: Arc<Http>,
     pub serenity_cache: Arc<Cache>,
 }
