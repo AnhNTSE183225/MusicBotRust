@@ -8,7 +8,7 @@ use songbird::Songbird;
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
-use crate::models::{QueueStateResponse, Song};
+use crate::models::{PlaybackStatus, QueueStateResponse, Song};
 use crate::voice::state::GuildMusicState;
 
 pub struct VoiceManager {
@@ -65,6 +65,7 @@ impl VoiceManager {
         {
             let mut state = state_arc.write().await;
             state.channel_id = Some(channel_id);
+            state.transition_to(PlaybackStatus::Idle, "joined voice channel");
         }
 
         let should_start = {
@@ -91,9 +92,8 @@ impl VoiceManager {
         let _ = self.songbird.remove(gid).await;
         let state_arc = self.get_or_create_state(guild_id).await;
         let mut state = state_arc.write().await;
+        state.transition_to(PlaybackStatus::Disconnected, "left voice channel");
         state.channel_id = None;
-        state.is_playing = false;
-        state.is_paused = false;
         state.track_handle = None;
         state.current_song = None;
         state.queue.clear();
@@ -174,7 +174,7 @@ impl VoiceManager {
             warn!("[Voice] Not connected to voice channel in guild {}", guild_id);
             let state_arc = self.get_or_create_state(guild_id).await;
             let mut state = state_arc.write().await;
-            state.is_playing = false;
+            state.transition_to(PlaybackStatus::Disconnected, "not connected to voice channel");
             state.track_handle = None;
             return Ok(());
         }
@@ -182,20 +182,25 @@ impl VoiceManager {
         let state_arc = self.get_or_create_state(guild_id).await;
         let next_song = {
             let mut state = state_arc.write().await;
-            if state.loop_enabled && state.current_song.is_some() {
-                state.current_song.clone()
+            let next_idx = state.queue_index + 1;
+            if next_idx >= 0 && (next_idx as usize) < state.queue.len() {
+                state.queue_index = next_idx;
+                let s = state.queue[next_idx as usize].clone();
+                state.current_song = Some(s.clone());
+                state.transition_to(PlaybackStatus::Loading, format!("preparing track '{}'", s.title));
+                Some(s)
+            } else if state.loop_enabled && !state.queue.is_empty() {
+                state.queue_index = 0;
+                let s = state.queue[0].clone();
+                state.current_song = Some(s.clone());
+                state.transition_to(PlaybackStatus::Loading, format!("looping playlist, preparing track '{}'", s.title));
+                Some(s)
             } else {
-                let next_idx = state.queue_index + 1;
-                if next_idx >= 0 && (next_idx as usize) < state.queue.len() {
-                    state.queue_index = next_idx;
-                    let s = state.queue[next_idx as usize].clone();
-                    state.current_song = Some(s.clone());
-                    Some(s)
-                } else {
-                    state.is_playing = false;
-                    state.track_handle = None;
-                    None
-                }
+                state.transition_to(PlaybackStatus::Idle, "queue completed (no more tracks)");
+                state.track_handle = None;
+                state.current_song = None;
+                state.queue_index = -1;
+                None
             }
         };
 
@@ -228,6 +233,11 @@ impl VoiceManager {
         };
 
         info!("[Voice] Playing track: '{}' ({})", song.title, song.url);
+        {
+            let state_arc = self.get_or_create_state(guild_id).await;
+            let mut state = state_arc.write().await;
+            state.transition_to(PlaybackStatus::Loading, format!("buffering stream for '{}'", song.title));
+        }
         let mut ytdl = std::process::Command::new("yt-dlp")
             .args([
                 "--extractor-args",
@@ -334,8 +344,7 @@ impl VoiceManager {
         {
             let mut state = state_arc.write().await;
             state.track_handle = Some(handle);
-            state.is_playing = true;
-            state.is_paused = false;
+            state.transition_to(PlaybackStatus::Playing, format!("playing track '{}'", song.title));
             state.skip_votes.clear();
         }
 
@@ -426,7 +435,7 @@ impl VoiceManager {
         if let Some(h) = &state.track_handle {
             let _ = h.pause();
         }
-        state.is_paused = true;
+        state.transition_to(PlaybackStatus::Paused, "paused by user");
         Ok(())
     }
 
@@ -436,7 +445,7 @@ impl VoiceManager {
         if let Some(h) = &state.track_handle {
             let _ = h.play();
         }
-        state.is_paused = false;
+        state.transition_to(PlaybackStatus::Playing, "resumed by user");
         Ok(())
     }
 
@@ -446,9 +455,8 @@ impl VoiceManager {
         if let Some(h) = &state.track_handle {
             let _ = h.stop();
         }
+        state.transition_to(PlaybackStatus::Idle, "stopped by user");
         state.track_handle = None;
-        state.is_playing = false;
-        state.is_paused = false;
         state.queue.clear();
         state.current_song = None;
         state.queue_index = -1;

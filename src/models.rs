@@ -19,8 +19,25 @@ pub struct Song {
     pub queue_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaybackStatus {
+    Disconnected,
+    Idle,
+    Loading,
+    Playing,
+    Paused,
+}
+
+impl Default for PlaybackStatus {
+    fn default() -> Self {
+        PlaybackStatus::Disconnected
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueStateResponse {
+    pub status: PlaybackStatus,
     pub queue: Vec<Song>,
     pub current: Option<Song>,
     pub queue_index: i32,

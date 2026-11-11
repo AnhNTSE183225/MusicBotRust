@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 use songbird::tracks::TrackHandle;
-use crate::models::{QueueStateResponse, Song};
+use tracing::info;
+use crate::models::{PlaybackStatus, QueueStateResponse, Song};
 
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct GuildMusicState {
     pub guild_id: u64,
+    pub status: PlaybackStatus,
     pub channel_id: Option<u64>,
     pub text_channel_id: Option<u64>,
     pub queue: Vec<Song>,
@@ -27,6 +29,7 @@ impl GuildMusicState {
     pub fn new(guild_id: u64, default_volume: f32) -> Self {
         Self {
             guild_id,
+            status: PlaybackStatus::Disconnected,
             channel_id: None,
             text_channel_id: None,
             queue: Vec::new(),
@@ -42,6 +45,18 @@ impl GuildMusicState {
             ai_prompt: String::new(),
             ai_set_by_name: None,
             ai_set_by_avatar: None,
+        }
+    }
+
+    pub fn transition_to(&mut self, next: PlaybackStatus, reason: impl std::fmt::Display) {
+        if self.status != next {
+            info!(
+                "[Voice State Machine] Guild {}: {:?} -> {:?} ({})",
+                self.guild_id, self.status, next, reason
+            );
+            self.status = next;
+            self.is_playing = next == PlaybackStatus::Playing;
+            self.is_paused = next == PlaybackStatus::Paused;
         }
     }
 
@@ -61,35 +76,68 @@ impl GuildMusicState {
 
     pub async fn to_response(&self, bot_connected: bool) -> QueueStateResponse {
         let mut position = 0.0;
-        let mut is_paused = self.is_paused;
+        let mut effective_status = if !bot_connected {
+            PlaybackStatus::Disconnected
+        } else {
+            self.status
+        };
 
-        if let Some(handle) = &self.track_handle {
-            if let Ok(info) = handle.get_info().await {
-                position = info.position.as_secs_f64();
-                is_paused = info.playing == songbird::tracks::PlayMode::Pause;
+        // Query active Songbird track handle if connected
+        if bot_connected {
+            if let Some(handle) = &self.track_handle {
+                if let Ok(info) = handle.get_info().await {
+                    position = info.position.as_secs_f64();
+                    match info.playing {
+                        songbird::tracks::PlayMode::Play => {
+                            effective_status = PlaybackStatus::Playing;
+                        }
+                        songbird::tracks::PlayMode::Pause => {
+                            effective_status = PlaybackStatus::Paused;
+                        }
+                        songbird::tracks::PlayMode::Stop | songbird::tracks::PlayMode::End => {
+                            if effective_status != PlaybackStatus::Loading {
+                                effective_status = PlaybackStatus::Idle;
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if effective_status != PlaybackStatus::Loading {
+                    effective_status = PlaybackStatus::Idle;
+                }
+            } else if effective_status == PlaybackStatus::Playing || effective_status == PlaybackStatus::Paused {
+                effective_status = PlaybackStatus::Idle;
             }
         }
+
+        let is_playing = effective_status == PlaybackStatus::Playing;
+        let is_paused = effective_status == PlaybackStatus::Paused;
 
         let mut queue = self.queue.clone();
         for song in &mut queue {
             Self::normalize_song(song);
         }
 
-        let mut current = self.current_song.clone();
+        let mut current = if is_playing || is_paused || effective_status == PlaybackStatus::Loading {
+            self.current_song.clone()
+        } else {
+            None
+        };
         if let Some(song) = &mut current {
             Self::normalize_song(song);
         }
 
+        let has_current = current.is_some();
         QueueStateResponse {
+            status: effective_status,
             queue,
             current,
-            queue_index: self.queue_index,
+            queue_index: if has_current { self.queue_index } else { -1 },
             volume: (self.volume * 100.0).round() as i32,
             loop_enabled: self.loop_enabled,
-            is_playing: self.is_playing,
+            is_playing,
             is_paused,
             bot_connected,
-            position,
+            position: if is_playing || is_paused { position } else { 0.0 },
             skip_votes: self.skip_votes.len() as u32,
             skip_votes_required: 1,
             pause_votes: 0,
