@@ -461,10 +461,37 @@ pub async fn control_skip(
     Query(q): Query<AuthQuery>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let _ = extract_session(&headers, Some(&q), &state).await?;
+    let session = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let _ = state.voice_mgr.skip(gid_u64).await;
-    Ok(Json(json!({ "status": "success" })))
+    let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
+
+    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
+        guild.owner_id == UserId::new(uid_u64)
+    } else {
+        false
+    };
+    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+
+    let is_requester = {
+        let cur = state.voice_mgr.get_queue_state(gid_u64).await;
+        cur.current.and_then(|c| c.requester_id).map(|r| r == session.user.id).unwrap_or(false)
+    };
+
+    if is_admin || is_requester {
+        let _ = state.voice_mgr.skip(gid_u64).await;
+        return Ok(Json(json!({ "status": "success", "executed": true })));
+    }
+
+    let (passed, current_votes, req_votes) = state.voice_mgr.vote_skip(gid_u64, uid_u64).await;
+    if passed {
+        let _ = state.voice_mgr.skip(gid_u64).await;
+    }
+    Ok(Json(json!({
+        "status": "success",
+        "executed": passed,
+        "votes": current_votes,
+        "required": req_votes
+    })))
 }
 
 pub async fn control_skipto(
@@ -524,10 +551,32 @@ pub async fn control_stop(
     Query(q): Query<AuthQuery>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let _ = extract_session(&headers, Some(&q), &state).await?;
+    let session = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let _ = state.voice_mgr.leave_channel(gid_u64).await;
-    Ok(Json(json!({ "status": "success" })))
+    let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
+
+    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
+        guild.owner_id == UserId::new(uid_u64)
+    } else {
+        false
+    };
+    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+
+    if is_admin {
+        let _ = state.voice_mgr.leave_channel(gid_u64).await;
+        return Ok(Json(json!({ "status": "success", "executed": true })));
+    }
+
+    let (passed, current_votes, req_votes) = state.voice_mgr.vote_stop(gid_u64, uid_u64).await;
+    if passed {
+        let _ = state.voice_mgr.leave_channel(gid_u64).await;
+    }
+    Ok(Json(json!({
+        "status": "success",
+        "executed": passed,
+        "votes": current_votes,
+        "required": req_votes
+    })))
 }
 
 pub async fn control_pause(
@@ -536,10 +585,32 @@ pub async fn control_pause(
     Query(q): Query<AuthQuery>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let _ = extract_session(&headers, Some(&q), &state).await?;
+    let session = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let _ = state.voice_mgr.pause(gid_u64).await;
-    Ok(Json(json!({ "status": "success" })))
+    let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
+
+    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
+        guild.owner_id == UserId::new(uid_u64)
+    } else {
+        false
+    };
+    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+
+    if is_admin {
+        let _ = state.voice_mgr.pause(gid_u64).await;
+        return Ok(Json(json!({ "status": "success", "executed": true })));
+    }
+
+    let (passed, current_votes, req_votes) = state.voice_mgr.vote_pause(gid_u64, uid_u64).await;
+    if passed {
+        let _ = state.voice_mgr.pause(gid_u64).await;
+    }
+    Ok(Json(json!({
+        "status": "success",
+        "executed": passed,
+        "votes": current_votes,
+        "required": req_votes
+    })))
 }
 
 pub async fn control_resume(
@@ -548,10 +619,32 @@ pub async fn control_resume(
     Query(q): Query<AuthQuery>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let _ = extract_session(&headers, Some(&q), &state).await?;
+    let session = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let _ = state.voice_mgr.resume(gid_u64).await;
-    Ok(Json(json!({ "status": "success" })))
+    let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
+
+    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
+        guild.owner_id == UserId::new(uid_u64)
+    } else {
+        false
+    };
+    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+
+    if is_admin {
+        let _ = state.voice_mgr.resume(gid_u64).await;
+        return Ok(Json(json!({ "status": "success", "executed": true })));
+    }
+
+    let (passed, current_votes, req_votes) = state.voice_mgr.vote_resume(gid_u64, uid_u64).await;
+    if passed {
+        let _ = state.voice_mgr.resume(gid_u64).await;
+    }
+    Ok(Json(json!({
+        "status": "success",
+        "executed": passed,
+        "votes": current_votes,
+        "required": req_votes
+    })))
 }
 
 pub async fn control_loop(

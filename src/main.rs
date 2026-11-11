@@ -75,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 5. Instantiate Core Voice Manager & Services
     let voice_mgr = Arc::new(VoiceManager::new(
         songbird_manager,
+        serenity_cache.clone(),
         pool.clone(),
         config.default_volume,
     ));

@@ -18,6 +18,9 @@ pub struct GuildMusicState {
     pub is_playing: bool,
     pub is_paused: bool,
     pub skip_votes: HashSet<u64>,
+    pub pause_votes: HashSet<u64>,
+    pub resume_votes: HashSet<u64>,
+    pub stop_votes: HashSet<u64>,
     pub track_handle: Option<TrackHandle>,
     pub ai_auto_enabled: bool,
     pub ai_prompt: String,
@@ -40,6 +43,9 @@ impl GuildMusicState {
             is_playing: false,
             is_paused: false,
             skip_votes: HashSet::new(),
+            pause_votes: HashSet::new(),
+            resume_votes: HashSet::new(),
+            stop_votes: HashSet::new(),
             track_handle: None,
             ai_auto_enabled: false,
             ai_prompt: String::new(),
@@ -74,7 +80,7 @@ impl GuildMusicState {
         }
     }
 
-    pub async fn to_response(&self, bot_connected: bool) -> QueueStateResponse {
+    pub async fn to_response(&self, bot_connected: bool, required_votes: u32) -> QueueStateResponse {
         let mut position = 0.0;
         let mut effective_status = if !bot_connected {
             PlaybackStatus::Disconnected
@@ -139,13 +145,13 @@ impl GuildMusicState {
             bot_connected,
             position: if is_playing || is_paused { position } else { 0.0 },
             skip_votes: self.skip_votes.len() as u32,
-            skip_votes_required: 1,
-            pause_votes: 0,
-            pause_votes_required: 1,
-            resume_votes: 0,
-            resume_votes_required: 1,
-            stop_votes: 0,
-            stop_votes_required: 1,
+            skip_votes_required: required_votes,
+            pause_votes: self.pause_votes.len() as u32,
+            pause_votes_required: required_votes,
+            resume_votes: self.resume_votes.len() as u32,
+            resume_votes_required: required_votes,
+            stop_votes: self.stop_votes.len() as u32,
+            stop_votes_required: required_votes,
             ai_auto_enabled: self.ai_auto_enabled,
             ai_prompt: self.ai_prompt.clone(),
             ai_set_by_name: self.ai_set_by_name.clone(),

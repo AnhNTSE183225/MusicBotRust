@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::Client;
-use serenity::all::{ChannelId, GuildId};
+use serenity::all::{Cache, ChannelId, GuildId, UserId};
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
 use songbird::Songbird;
 use sqlx::SqlitePool;
@@ -13,6 +13,7 @@ use crate::voice::state::GuildMusicState;
 
 pub struct VoiceManager {
     songbird: Arc<Songbird>,
+    cache: Arc<Cache>,
     states: Arc<RwLock<HashMap<u64, Arc<RwLock<GuildMusicState>>>>>,
     http_client: Client,
     db_pool: SqlitePool,
@@ -22,11 +23,13 @@ pub struct VoiceManager {
 impl VoiceManager {
     pub fn new(
         songbird: Arc<Songbird>,
+        cache: Arc<Cache>,
         db_pool: SqlitePool,
         default_volume: f32,
     ) -> Self {
         Self {
             songbird,
+            cache,
             states: Arc::new(RwLock::new(HashMap::new())),
             http_client: Client::builder()
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -99,6 +102,9 @@ impl VoiceManager {
         state.queue.clear();
         state.queue_index = -1;
         state.skip_votes.clear();
+        state.pause_votes.clear();
+        state.resume_votes.clear();
+        state.stop_votes.clear();
         Ok(())
     }
 
@@ -346,6 +352,8 @@ impl VoiceManager {
             state.track_handle = Some(handle);
             state.transition_to(PlaybackStatus::Playing, format!("playing track '{}'", song.title));
             state.skip_votes.clear();
+            state.pause_votes.clear();
+            state.resume_votes.clear();
         }
 
         // Check if autoqueue needs to trigger
@@ -436,6 +444,7 @@ impl VoiceManager {
             let _ = h.pause();
         }
         state.transition_to(PlaybackStatus::Paused, "paused by user");
+        state.pause_votes.clear();
         Ok(())
     }
 
@@ -446,6 +455,7 @@ impl VoiceManager {
             let _ = h.play();
         }
         state.transition_to(PlaybackStatus::Playing, "resumed by user");
+        state.resume_votes.clear();
         Ok(())
     }
 
@@ -461,6 +471,9 @@ impl VoiceManager {
         state.current_song = None;
         state.queue_index = -1;
         state.skip_votes.clear();
+        state.pause_votes.clear();
+        state.resume_votes.clear();
+        state.stop_votes.clear();
         Ok(())
     }
 
@@ -507,11 +520,184 @@ impl VoiceManager {
         Ok(())
     }
 
+    pub fn get_voice_participants(&self, guild_id: u64, channel_id: Option<u64>) -> Vec<u64> {
+        let channel_id = match channel_id {
+            Some(cid) => cid,
+            None => return Vec::new(),
+        };
+        let target_chan = ChannelId::new(channel_id);
+
+        if let Some(guild) = self.cache.guild(GuildId::new(guild_id)) {
+            let bot_id = self.cache.current_user().id;
+            let mut participants = Vec::new();
+            for (uid, vs) in &guild.voice_states {
+                if vs.channel_id == Some(target_chan) && *uid != bot_id {
+                    let is_bot = if let Some(m) = &vs.member {
+                        m.user.bot
+                    } else if let Some(m) = guild.members.get(uid) {
+                        m.user.bot
+                    } else {
+                        false
+                    };
+                    if !is_bot {
+                        participants.push(uid.get());
+                    }
+                }
+            }
+            participants
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn calculate_required_votes(&self, participant_count: usize) -> u32 {
+        if participant_count == 0 {
+            return 1;
+        }
+        let ratio = 0.5;
+        let base_required = (participant_count as f64 * ratio).floor() as u32 + 1;
+        base_required.max(1).min(participant_count as u32)
+    }
+
+    pub async fn get_active_channel_id(&self, guild_id: u64) -> Option<u64> {
+        if let Some(guild) = self.cache.guild(GuildId::new(guild_id)) {
+            let bot_id = self.cache.current_user().id;
+            if let Some(vs) = guild.voice_states.get(&bot_id) {
+                if let Some(cid) = vs.channel_id {
+                    return Some(cid.get());
+                }
+            }
+        }
+        let state_arc = self.get_or_create_state(guild_id).await;
+        let state = state_arc.read().await;
+        state.channel_id
+    }
+
     pub async fn get_queue_state(&self, guild_id: u64) -> QueueStateResponse {
+        let channel_id = self.get_active_channel_id(guild_id).await;
+        let participants = self.get_voice_participants(guild_id, channel_id);
+        let req_votes = self.calculate_required_votes(participants.len());
+
         let state_arc = self.get_or_create_state(guild_id).await;
         let state = state_arc.read().await;
         let connected = self.is_connected(guild_id).await;
-        state.to_response(connected).await
+        state.to_response(connected, req_votes).await
+    }
+
+    pub async fn vote_skip(&self, guild_id: u64, user_id: u64) -> (bool, u32, u32) {
+        let channel_id = self.get_active_channel_id(guild_id).await;
+        let participants = self.get_voice_participants(guild_id, channel_id);
+        let req = self.calculate_required_votes(participants.len());
+
+        let state_arc = self.get_or_create_state(guild_id).await;
+        let mut state = state_arc.write().await;
+
+        if !participants.is_empty() {
+            state.skip_votes.retain(|id| participants.contains(id));
+        }
+
+        if state.skip_votes.contains(&user_id) {
+            state.skip_votes.remove(&user_id);
+            info!("[Vote] Guild {}: User {} removed skip vote ({}/{})", guild_id, user_id, state.skip_votes.len(), req);
+            (false, state.skip_votes.len() as u32, req)
+        } else {
+            state.skip_votes.insert(user_id);
+            let count = state.skip_votes.len() as u32;
+            info!("[Vote] Guild {}: User {} voted to skip ({}/{})", guild_id, user_id, count, req);
+            if count >= req {
+                state.skip_votes.clear();
+                (true, count, req)
+            } else {
+                (false, count, req)
+            }
+        }
+    }
+
+    pub async fn vote_pause(&self, guild_id: u64, user_id: u64) -> (bool, u32, u32) {
+        let channel_id = self.get_active_channel_id(guild_id).await;
+        let participants = self.get_voice_participants(guild_id, channel_id);
+        let req = self.calculate_required_votes(participants.len());
+
+        let state_arc = self.get_or_create_state(guild_id).await;
+        let mut state = state_arc.write().await;
+
+        if !participants.is_empty() {
+            state.pause_votes.retain(|id| participants.contains(id));
+        }
+
+        if state.pause_votes.contains(&user_id) {
+            state.pause_votes.remove(&user_id);
+            info!("[Vote] Guild {}: User {} removed pause vote ({}/{})", guild_id, user_id, state.pause_votes.len(), req);
+            (false, state.pause_votes.len() as u32, req)
+        } else {
+            state.pause_votes.insert(user_id);
+            let count = state.pause_votes.len() as u32;
+            info!("[Vote] Guild {}: User {} voted to pause ({}/{})", guild_id, user_id, count, req);
+            if count >= req {
+                state.pause_votes.clear();
+                (true, count, req)
+            } else {
+                (false, count, req)
+            }
+        }
+    }
+
+    pub async fn vote_resume(&self, guild_id: u64, user_id: u64) -> (bool, u32, u32) {
+        let channel_id = self.get_active_channel_id(guild_id).await;
+        let participants = self.get_voice_participants(guild_id, channel_id);
+        let req = self.calculate_required_votes(participants.len());
+
+        let state_arc = self.get_or_create_state(guild_id).await;
+        let mut state = state_arc.write().await;
+
+        if !participants.is_empty() {
+            state.resume_votes.retain(|id| participants.contains(id));
+        }
+
+        if state.resume_votes.contains(&user_id) {
+            state.resume_votes.remove(&user_id);
+            info!("[Vote] Guild {}: User {} removed resume vote ({}/{})", guild_id, user_id, state.resume_votes.len(), req);
+            (false, state.resume_votes.len() as u32, req)
+        } else {
+            state.resume_votes.insert(user_id);
+            let count = state.resume_votes.len() as u32;
+            info!("[Vote] Guild {}: User {} voted to resume ({}/{})", guild_id, user_id, count, req);
+            if count >= req {
+                state.resume_votes.clear();
+                (true, count, req)
+            } else {
+                (false, count, req)
+            }
+        }
+    }
+
+    pub async fn vote_stop(&self, guild_id: u64, user_id: u64) -> (bool, u32, u32) {
+        let channel_id = self.get_active_channel_id(guild_id).await;
+        let participants = self.get_voice_participants(guild_id, channel_id);
+        let req = self.calculate_required_votes(participants.len());
+
+        let state_arc = self.get_or_create_state(guild_id).await;
+        let mut state = state_arc.write().await;
+
+        if !participants.is_empty() {
+            state.stop_votes.retain(|id| participants.contains(id));
+        }
+
+        if state.stop_votes.contains(&user_id) {
+            state.stop_votes.remove(&user_id);
+            info!("[Vote] Guild {}: User {} removed stop vote ({}/{})", guild_id, user_id, state.stop_votes.len(), req);
+            (false, state.stop_votes.len() as u32, req)
+        } else {
+            state.stop_votes.insert(user_id);
+            let count = state.stop_votes.len() as u32;
+            info!("[Vote] Guild {}: User {} voted to stop ({}/{})", guild_id, user_id, count, req);
+            if count >= req {
+                state.stop_votes.clear();
+                (true, count, req)
+            } else {
+                (false, count, req)
+            }
+        }
     }
 }
 
