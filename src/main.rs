@@ -105,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         http_client: reqwest::Client::builder().build().unwrap_or_default(),
         discord_http,
         serenity_cache,
+        mobile_auth_pending: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let router = api::create_router(app_state);

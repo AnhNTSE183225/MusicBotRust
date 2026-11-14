@@ -5,7 +5,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive},
-        IntoResponse, Redirect, Response, Sse,
+        Html, IntoResponse, Redirect, Response, Sse,
     },
     Json,
 };
@@ -30,8 +30,20 @@ pub struct AuthQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LoginQuery {
+    pub platform: Option<String>,
+    pub mobile_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
     pub code: Option<String>,
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobilePollQuery {
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,13 +86,36 @@ pub async fn extract_session(
 // OAuth & Auth
 // ---------------------------------------------------------------------------
 
-pub async fn login(State(state): State<AppState>) -> impl IntoResponse {
-    let url = format!(
+pub async fn login(
+    Query(q): Query<LoginQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let mut url = format!(
         "https://discord.com/api/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=identify%20guilds",
         state.config.discord_client_id,
         url::form_urlencoded::byte_serialize(state.config.discord_redirect_uri.as_bytes()).collect::<String>()
     );
-    debug!("[Auth] /login invoked, redirecting to Discord: {}", url);
+
+    let is_mobile = q
+        .platform
+        .as_deref()
+        .map(|p| p.eq_ignore_ascii_case("mobile"))
+        .unwrap_or(false)
+        || q.mobile_state.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+
+    if is_mobile {
+        let state_key = q
+            .mobile_state
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("app");
+        let oauth_state = format!("mobile:{}", state_key.trim());
+        let encoded_state: String =
+            url::form_urlencoded::byte_serialize(oauth_state.as_bytes()).collect();
+        url.push_str(&format!("&state={}", encoded_state));
+    }
+
+    debug!("[Auth] /login invoked (mobile={}), redirecting to Discord: {}", is_mobile, url);
     Redirect::temporary(&url)
 }
 
@@ -200,9 +235,143 @@ pub async fn callback(
     }
     debug!("[Auth] Created session {} for user {} ({})", session_id, user.username, user.id);
 
+    if let Some(oauth_state) = q.state.as_deref() {
+        if let Some(mobile_key) = oauth_state.strip_prefix("mobile:") {
+            let clean_key = mobile_key.trim();
+            if !clean_key.is_empty() {
+                if let Ok(mut map) = state.mobile_auth_pending.write() {
+                    let now = std::time::Instant::now();
+                    map.retain(|_, (_, created)| now.duration_since(*created) < Duration::from_secs(300));
+                    map.insert(clean_key.to_string(), (session_id.clone(), now));
+                }
+            }
+
+            let deep_link = format!("musicbot://auth-callback?token={}", session_id);
+            let intent_link = format!(
+                "intent://auth-callback?token={}#Intent;scheme=musicbot;package=com.musicbot.musicbot_mobile;end",
+                session_id
+            );
+            let html = format!(
+                r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Music Bot Mobile Connected</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0b1014;
+      color: #f4f7f9;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 24px;
+      box-sizing: border-box;
+    }}
+    .card {{
+      max-width: 400px;
+      width: 100%;
+      background: #141c24;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 20px;
+      padding: 28px 24px;
+      text-align: center;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    }}
+    .badge {{
+      width: 52px;
+      height: 52px;
+      border-radius: 16px;
+      background: rgba(29, 185, 84, 0.16);
+      border: 1px solid rgba(29, 185, 84, 0.45);
+      color: #1db954;
+      font-size: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 16px;
+    }}
+    h1 {{ font-size: 18px; margin: 0 0 8px; font-weight: 800; }}
+    p {{ font-size: 13px; color: #9aa7b4; line-height: 1.5; margin: 0 0 20px; }}
+    .btn {{
+      display: block;
+      width: 100%;
+      padding: 13px 16px;
+      background: #1db954;
+      color: #0b1014;
+      font-weight: 800;
+      font-size: 14px;
+      border-radius: 12px;
+      text-decoration: none;
+      box-sizing: border-box;
+      margin-bottom: 10px;
+    }}
+    .btn-secondary {{
+      display: block;
+      width: 100%;
+      padding: 11px 16px;
+      background: rgba(255,255,255,0.06);
+      color: #f4f7f9;
+      font-weight: 700;
+      font-size: 12px;
+      border-radius: 12px;
+      text-decoration: none;
+      box-sizing: border-box;
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">&#10003;</div>
+    <h1>Signed in as @{username}</h1>
+    <p>Discord authentication succeeded. Returning to <strong>MusicBotMobile</strong>...</p>
+    <a class="btn" href="{deep_link}">Return to MusicBotMobile App</a>
+    <a class="btn-secondary" href="{intent_link}">Open via Android Intent</a>
+  </div>
+  <script>
+    window.location.replace("{deep_link}");
+    setTimeout(function() {{
+      window.location.href = "{intent_link}";
+    }}, 800);
+  </script>
+</body>
+</html>"#,
+                username = user.username,
+                deep_link = deep_link,
+                intent_link = intent_link
+            );
+            return Ok(Html(html).into_response());
+        }
+    }
+
     let separator = if state.config.frontend_url.contains('?') { "&" } else { "?" };
     let redirect_url = format!("{}{}{}", state.config.frontend_url, separator, format!("token={}", session_id));
     Ok(Redirect::temporary(&redirect_url).into_response())
+}
+
+pub async fn poll_mobile_auth(
+    Query(q): Query<MobilePollQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let key = q.state.unwrap_or_default();
+    let clean_key = key.strip_prefix("mobile:").unwrap_or(&key).trim().to_string();
+    if clean_key.is_empty() {
+        return Json(json!({ "authenticated": false }));
+    }
+    if let Ok(mut map) = state.mobile_auth_pending.write() {
+        let now = std::time::Instant::now();
+        map.retain(|_, (_, created)| now.duration_since(*created) < Duration::from_secs(300));
+        if let Some((token, _)) = map.remove(&clean_key) {
+            return Json(json!({
+                "authenticated": true,
+                "token": token,
+            }));
+        }
+    }
+    Json(json!({ "authenticated": false }))
 }
 
 pub async fn get_me(

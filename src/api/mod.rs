@@ -1,6 +1,8 @@
 pub mod routes;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use axum::{
     http::{header, Method},
     routing::{delete, get, post, put},
@@ -26,6 +28,7 @@ pub struct AppState {
     pub http_client: Client,
     pub discord_http: Arc<Http>,
     pub serenity_cache: Arc<Cache>,
+    pub mobile_auth_pending: Arc<RwLock<HashMap<String, (String, Instant)>>>,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -48,7 +51,10 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .route("/login", get(routes::login))
+        .route("/api/login", get(routes::login))
         .route("/callback", get(routes::callback))
+        .route("/auth/mobile/poll", get(routes::poll_mobile_auth))
+        .route("/api/auth/mobile/poll", get(routes::poll_mobile_auth))
         .route("/api/me", get(routes::get_me))
         .route("/api/logout", post(routes::logout))
         .route("/api/guilds", get(routes::get_guilds))
