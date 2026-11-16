@@ -66,6 +66,72 @@ impl GuildMusicState {
         }
     }
 
+    pub fn should_auto_start_on_enqueue(&self) -> bool {
+        matches!(self.status, PlaybackStatus::Idle | PlaybackStatus::Disconnected)
+    }
+
+    pub fn advance_next_track(&mut self) -> Option<Song> {
+        let next_idx = self.queue_index + 1;
+        if next_idx >= 0 && (next_idx as usize) < self.queue.len() {
+            self.queue_index = next_idx;
+            let s = self.queue[next_idx as usize].clone();
+            self.current_song = Some(s.clone());
+            self.transition_to(PlaybackStatus::Loading, format!("preparing track '{}'", s.title));
+            Some(s)
+        } else if self.loop_enabled && !self.queue.is_empty() {
+            self.queue_index = 0;
+            let s = self.queue[0].clone();
+            self.current_song = Some(s.clone());
+            self.transition_to(
+                PlaybackStatus::Loading,
+                format!("looping playlist, preparing track '{}'", s.title),
+            );
+            Some(s)
+        } else {
+            self.transition_to(PlaybackStatus::Idle, "queue completed (no more tracks)");
+            self.track_handle = None;
+            self.current_song = None;
+            // Preserve cursor at last finished track (len - 1) so appending a track continues at queue[len].
+            self.queue_index = if self.queue.is_empty() {
+                -1
+            } else {
+                (self.queue.len() as i32) - 1
+            };
+            None
+        }
+    }
+
+    pub fn clear_queue_preserving_active(&mut self) {
+        if matches!(self.status, PlaybackStatus::Idle | PlaybackStatus::Disconnected) {
+            self.queue.clear();
+            self.queue_index = -1;
+        } else {
+            let cur_idx = self.queue_index as usize;
+            if cur_idx < self.queue.len() {
+                self.queue.truncate(cur_idx + 1);
+            } else {
+                self.queue.clear();
+                self.queue_index = -1;
+            }
+        }
+    }
+
+    pub fn remove_queue_item(&mut self, one_based_index: usize) {
+        if one_based_index > 0 && one_based_index <= self.queue.len() {
+            let zero_idx = one_based_index - 1;
+            self.queue.remove(zero_idx);
+            let is_idle = matches!(self.status, PlaybackStatus::Idle | PlaybackStatus::Disconnected);
+            if (zero_idx as i32) < self.queue_index
+                || (is_idle && (zero_idx as i32) == self.queue_index)
+            {
+                self.queue_index -= 1;
+            }
+            if self.queue.is_empty() {
+                self.queue_index = -1;
+            }
+        }
+    }
+
     fn normalize_song(song: &mut Song) {
         if song.requester_handle.is_none() {
             song.requester_handle = song.requester_name.clone();
@@ -157,5 +223,88 @@ impl GuildMusicState {
             ai_set_by_name: self.ai_set_by_name.clone(),
             ai_set_by_avatar: self.ai_set_by_avatar.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_song(title: &str) -> Song {
+        Song {
+            url: format!("https://www.youtube.com/watch?v={}", title),
+            title: title.to_string(),
+            artist: None,
+            thumbnail: None,
+            duration: 100.0,
+            requester_id: None,
+            requester_name: None,
+            requester_avatar: None,
+            requester_handle: None,
+            queue_id: None,
+            stream_url: None,
+            stream_user_agent: None,
+        }
+    }
+
+    #[test]
+    fn adding_second_song_after_first_finishes_plays_second_song_not_first() {
+        let mut state = GuildMusicState::new(1, 0.75);
+        state.transition_to(PlaybackStatus::Idle, "joined");
+
+        // Enqueue song 1 and advance
+        state.queue.push(sample_song("XUrmskUYoas"));
+        assert!(state.should_auto_start_on_enqueue());
+        let first = state.advance_next_track().expect("should select song 1");
+        assert_eq!(first.title, "XUrmskUYoas");
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(state.status, PlaybackStatus::Loading);
+
+        // Simulate song 1 playing, then finishing
+        state.transition_to(PlaybackStatus::Playing, "started");
+        let after_first = state.advance_next_track();
+        assert!(after_first.is_none());
+        assert_eq!(state.status, PlaybackStatus::Idle);
+        assert!(state.current_song.is_none());
+        assert_eq!(state.queue_index, 0);
+
+        // User adds song 2 while Idle -> must continue to song 2 (index 1), not replay song 1 (index 0)
+        state.queue.push(sample_song("WWEs82u37Mw"));
+        assert!(state.should_auto_start_on_enqueue());
+        let second = state.advance_next_track().expect("should select song 2");
+        assert_eq!(second.title, "WWEs82u37Mw");
+        assert_eq!(state.queue_index, 1);
+        assert_eq!(state.status, PlaybackStatus::Loading);
+    }
+
+    #[test]
+    fn enqueue_while_loading_or_paused_does_not_interrupt_current_track() {
+        let mut state = GuildMusicState::new(1, 0.75);
+        state.transition_to(PlaybackStatus::Loading, "buffering song 1");
+        assert!(!state.should_auto_start_on_enqueue());
+
+        state.transition_to(PlaybackStatus::Paused, "paused song 1");
+        assert!(!state.should_auto_start_on_enqueue());
+    }
+
+    #[test]
+    fn clear_and_remove_keep_queue_index_consistent_when_idle() {
+        let mut state = GuildMusicState::new(1, 0.75);
+        state.queue.push(sample_song("song1"));
+        state.advance_next_track();
+        state.transition_to(PlaybackStatus::Playing, "playing");
+        state.advance_next_track(); // finishes -> Idle, queue_index = 0
+
+        state.remove_queue_item(1);
+        assert!(state.queue.is_empty());
+        assert_eq!(state.queue_index, -1);
+
+        state.queue.push(sample_song("song1"));
+        state.advance_next_track();
+        state.transition_to(PlaybackStatus::Playing, "playing");
+        state.advance_next_track(); // Idle, queue_index = 0
+        state.clear_queue_preserving_active();
+        assert!(state.queue.is_empty());
+        assert_eq!(state.queue_index, -1);
     }
 }

@@ -510,6 +510,16 @@ pub async fn get_queue(
     Ok(Json(queue_state))
 }
 
+fn resolve_user_voice_channel(state: &AppState, session_user_id: &str, guild_id: u64) -> Option<u64> {
+    let uid_u64: u64 = session_user_id.parse().unwrap_or(0);
+    if let Some(guild) = state.serenity_cache.guild(GuildId::new(guild_id)) {
+        if let Some(vs) = guild.voice_states.get(&UserId::new(uid_u64)) {
+            return vs.channel_id.map(|cid| cid.get());
+        }
+    }
+    None
+}
+
 pub async fn ensure_voice_connected(
     state: &AppState,
     session_user_id: &str,
@@ -519,16 +529,8 @@ pub async fn ensure_voice_connected(
         return Ok(());
     }
 
-    let uid_u64: u64 = session_user_id.parse().unwrap_or(0);
-    let mut target_channel = None;
-    if let Some(guild) = state.serenity_cache.guild(GuildId::new(guild_id)) {
-        if let Some(vs) = guild.voice_states.get(&UserId::new(uid_u64)) {
-            target_channel = vs.channel_id;
-        }
-    }
-
-    let channel_id = match target_channel {
-        Some(cid) => cid.get(),
+    let channel_id = match resolve_user_voice_channel(state, session_user_id, guild_id) {
+        Some(cid) => cid,
         None => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -559,7 +561,15 @@ pub async fn add_song(
     let session = extract_session(&headers, Some(&q), &state).await?;
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
 
-    ensure_voice_connected(&state, &session.user.id, gid_u64).await?;
+    // Fail fast (<1ms) if bot is disconnected and user isn't in a voice channel
+    if !state.voice_mgr.is_connected(gid_u64).await
+        && resolve_user_voice_channel(&state, &session.user.id, gid_u64).is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "You must be in a voice channel first to play music" })),
+        ));
+    }
 
     let requester_name = session
         .user
@@ -572,14 +582,19 @@ pub async fn add_song(
         .as_ref()
         .map(|a| format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", session.user.id, a));
 
-    let song = match crate::services::youtube::extract_song_metadata(
-        &req.url,
-        Some(session.user.id.clone()),
-        Some(requester_name),
-        requester_avatar,
-    )
-    .await
-    {
+    // Overlap Discord voice join (~1.2s) with YouTube metadata + stream URL extraction (~5s)
+    let (voice_res, meta_res) = tokio::join!(
+        ensure_voice_connected(&state, &session.user.id, gid_u64),
+        crate::services::youtube::extract_song_metadata(
+            &req.url,
+            Some(session.user.id.clone()),
+            Some(requester_name),
+            requester_avatar,
+        )
+    );
+
+    voice_res?;
+    let song = match meta_res {
         Ok(s) => s,
         Err(e) => {
             return Err((
@@ -933,6 +948,8 @@ pub async fn playlist_add(
                     requester_avatar: requester_avatar.clone(),
                     requester_handle: Some(requester_name.clone()),
                     queue_id: Some(uuid::Uuid::new_v4().to_string()),
+                    stream_url: None,
+                    stream_user_agent: None,
                 });
             }
         }
@@ -958,6 +975,8 @@ pub async fn playlist_add(
                     requester_avatar: requester_avatar.clone(),
                     requester_handle: Some(requester_name.clone()),
                     queue_id: Some(uuid::Uuid::new_v4().to_string()),
+                    stream_url: None,
+                    stream_user_agent: None,
                 });
             }
         }
@@ -1060,6 +1079,8 @@ pub async fn ai_confirm_batch(
             requester_avatar: requester_avatar.clone(),
             requester_handle: Some(requester_name.clone()),
             queue_id: Some(uuid::Uuid::new_v4().to_string()),
+            stream_url: None,
+            stream_user_agent: None,
         })
         .collect();
 

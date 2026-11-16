@@ -17,6 +17,10 @@ pub struct Song {
     pub requester_handle: Option<String>,
     #[serde(default)]
     pub queue_id: Option<String>,
+    #[serde(skip)]
+    pub stream_url: Option<String>,
+    #[serde(skip)]
+    pub stream_user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -318,4 +322,37 @@ pub struct UserSession {
     pub access_token: String,
     pub created_at: f64,
     pub expires_at: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn song_skips_internal_stream_fields_in_json() {
+        let song = Song {
+            url: "https://www.youtube.com/watch?v=XUrmskUYoas".to_string(),
+            title: "MADEAWISH".to_string(),
+            artist: Some("Artist".to_string()),
+            thumbnail: None,
+            duration: 95.0,
+            requester_id: None,
+            requester_name: None,
+            requester_avatar: None,
+            requester_handle: None,
+            queue_id: None,
+            stream_url: Some("https://rr1---sn.googlevideo.com/secret-token".to_string()),
+            stream_user_agent: Some("Mozilla/5.0".to_string()),
+        };
+
+        let json_str = serde_json::to_string(&song).expect("serialize Song");
+        assert!(!json_str.contains("stream_url"));
+        assert!(!json_str.contains("googlevideo.com"));
+        assert!(!json_str.contains("stream_user_agent"));
+
+        let decoded: Song = serde_json::from_str(&json_str).expect("deserialize Song");
+        assert_eq!(decoded.title, "MADEAWISH");
+        assert!(decoded.stream_url.is_none());
+        assert!(decoded.stream_user_agent.is_none());
+    }
 }

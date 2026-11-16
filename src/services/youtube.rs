@@ -30,19 +30,47 @@ pub fn build_yt_music_search_url(query: &str) -> String {
     )
 }
 
-async fn fetch_direct_metadata(
+pub const AUDIO_FORMAT_SPEC: &str = "ba[acodec=opus]/ba[ext=m4a]/ba/bestaudio/best";
+
+async fn run_ytdlp_dump_json(
     target: &str,
-) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let started = Instant::now();
+    player_client: &str,
+) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
+    let extractor_arg = format!("youtube:player_client={}", player_client);
     let output = Command::new("yt-dlp")
         .arg("--dump-json")
         .arg("--no-playlist")
-        .args(["--extractor-args", "youtube:player_client=android,ios,mweb,web"])
+        .arg("--no-warnings")
+        .args(["-f", AUDIO_FORMAT_SPEC])
+        .args(["--extractor-args", &extractor_arg])
         .arg(target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .await?;
+    Ok(output)
+}
+
+async fn fetch_direct_metadata(
+    target: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
+    // Use fast single-client android_vr first; fall back to android,mweb,web (skipping broken ios) on failure.
+    let mut client_used = "android_vr";
+    let mut output = run_ytdlp_dump_json(target, client_used).await?;
+
+    if !output.status.success() {
+        let primary_err = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            target: "youtube",
+            duration_ms = started.elapsed().as_millis() as u64,
+            query = %target,
+            "[YouTube] android_vr client failed, retrying with fallback clients: {}",
+            primary_err.trim()
+        );
+        client_used = "android,mweb,web";
+        output = run_ytdlp_dump_json(target, client_used).await?;
+    }
 
     let duration_ms = started.elapsed().as_millis() as u64;
     if !output.status.success() {
@@ -51,6 +79,7 @@ async fn fetch_direct_metadata(
             target: "youtube",
             duration_ms = duration_ms,
             query = %target,
+            client = client_used,
             "[YouTube] yt-dlp direct metadata failed ({}ms): {}",
             duration_ms,
             err.trim()
@@ -58,16 +87,20 @@ async fn fetch_direct_metadata(
         return Err(format!("yt-dlp metadata extraction failed: {}", err).into());
     }
 
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&json_str)?;
+    let has_stream_url = val.get("url").and_then(|v| v.as_str()).is_some();
     info!(
         target: "youtube",
         duration_ms = duration_ms,
+        client = client_used,
+        has_stream_url = has_stream_url,
         query = %target,
-        "[YouTube] Extracted direct metadata in {}ms",
-        duration_ms
+        "[YouTube] Extracted direct metadata in {}ms (client={}, cached_stream={})",
+        duration_ms,
+        client_used,
+        has_stream_url
     );
-
-    let json_str = String::from_utf8_lossy(&output.stdout);
-    let val: serde_json::Value = serde_json::from_str(&json_str)?;
     Ok(val)
 }
 
@@ -178,6 +211,16 @@ pub async fn extract_song_metadata(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| query.to_string());
+    let stream_url = val
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let stream_user_agent = val
+        .get("http_headers")
+        .and_then(|h| h.get("User-Agent"))
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string());
 
     Ok(Song {
         url: webpage_url,
@@ -190,6 +233,8 @@ pub async fn extract_song_metadata(
         requester_name,
         requester_avatar,
         queue_id: Some(uuid::Uuid::new_v4().to_string()),
+        stream_url,
+        stream_user_agent,
     })
 }
 

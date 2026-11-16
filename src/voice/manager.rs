@@ -126,7 +126,7 @@ impl VoiceManager {
         let should_start = {
             let mut state = state_arc.write().await;
             state.queue.push(song);
-            !state.is_playing || state.track_handle.is_none()
+            state.should_auto_start_on_enqueue()
         };
 
         if should_start {
@@ -147,7 +147,7 @@ impl VoiceManager {
             for song in songs {
                 state.queue.push(song);
             }
-            !state.is_playing || state.track_handle.is_none()
+            state.should_auto_start_on_enqueue()
         };
 
         if should_start {
@@ -188,26 +188,7 @@ impl VoiceManager {
         let state_arc = self.get_or_create_state(guild_id).await;
         let next_song = {
             let mut state = state_arc.write().await;
-            let next_idx = state.queue_index + 1;
-            if next_idx >= 0 && (next_idx as usize) < state.queue.len() {
-                state.queue_index = next_idx;
-                let s = state.queue[next_idx as usize].clone();
-                state.current_song = Some(s.clone());
-                state.transition_to(PlaybackStatus::Loading, format!("preparing track '{}'", s.title));
-                Some(s)
-            } else if state.loop_enabled && !state.queue.is_empty() {
-                state.queue_index = 0;
-                let s = state.queue[0].clone();
-                state.current_song = Some(s.clone());
-                state.transition_to(PlaybackStatus::Loading, format!("looping playlist, preparing track '{}'", s.title));
-                Some(s)
-            } else {
-                state.transition_to(PlaybackStatus::Idle, "queue completed (no more tracks)");
-                state.track_handle = None;
-                state.current_song = None;
-                state.queue_index = -1;
-                None
-            }
+            state.advance_next_track()
         };
 
         let song = match next_song {
@@ -232,7 +213,7 @@ impl VoiceManager {
                 warn!("[Voice] Not connected to voice channel in guild {}", guild_id);
                 let state_arc = self.get_or_create_state(guild_id).await;
                 let mut state = state_arc.write().await;
-                state.is_playing = false;
+                state.transition_to(PlaybackStatus::Disconnected, "voice handler missing");
                 state.track_handle = None;
                 return Ok(());
             }
@@ -244,81 +225,74 @@ impl VoiceManager {
             let mut state = state_arc.write().await;
             state.transition_to(PlaybackStatus::Loading, format!("buffering stream for '{}'", song.title));
         }
-        let mut ytdl = std::process::Command::new("yt-dlp")
-            .args([
-                "--extractor-args",
-                "youtube:player_client=android,ios,mweb,web",
-                "-o",
-                "-",
-                "-f",
-                "ba[acodec=opus]/ba[ext=m4a]/ba/bestaudio/best",
-                "--no-warnings",
-                &song.url,
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()?;
 
-        let ytdl_stdout = ytdl.stdout.take().ok_or("Failed to capture yt-dlp stdout")?;
+        let (mut initial_bytes, mut container) = if let Some(direct_url) = &song.stream_url {
+            let direct_container = Self::spawn_direct_ffmpeg(direct_url, song.stream_user_agent.as_deref())?;
+            let prebuf_started = std::time::Instant::now();
+            let (bytes, c) = Self::prebuffer_audio(direct_container).await?;
+            let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
+            info!(
+                target: "voice",
+                guild_id = guild_id,
+                duration_ms = prebuf_ms,
+                bytes = bytes.len(),
+                mode = "direct_stream_url",
+                track = %song.title,
+                "[Voice] Pre-buffered '{}' via direct URL ({} bytes in {}ms)",
+                song.title,
+                bytes.len(),
+                prebuf_ms
+            );
+            (bytes, c)
+        } else {
+            let pipe_container = Self::spawn_ytdlp_ffmpeg_pipeline(&song.url)?;
+            let prebuf_started = std::time::Instant::now();
+            let (bytes, c) = Self::prebuffer_audio(pipe_container).await?;
+            let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
+            info!(
+                target: "voice",
+                guild_id = guild_id,
+                duration_ms = prebuf_ms,
+                bytes = bytes.len(),
+                mode = "ytdlp_pipe",
+                track = %song.title,
+                "[Voice] Pre-buffered '{}' via yt-dlp pipe ({} bytes in {}ms)",
+                song.title,
+                bytes.len(),
+                prebuf_ms
+            );
+            (bytes, c)
+        };
 
-        let ffmpeg = std::process::Command::new("ffmpeg")
-            .args([
-                "-v",
-                "warning",
-                "-vn",
-                "-i",
-                "pipe:0",
-                "-f",
-                "f32le",
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
-                "pipe:1",
-            ])
-            .stdin(ytdl_stdout)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()?;
-
-        let mut container = songbird::input::ChildContainer::from(vec![ytdl, ffmpeg]);
-
-        // Pre-buffer ~0.5s of audio (192,000 bytes of f32le stereo 48kHz PCM) in a worker thread
-        // before attaching to the Songbird mixer. This eliminates mixer thread blocking on yt-dlp startup,
-        // clock-skew frame drops, and prevents the initial 5 seconds from skipping in Discord.
-        let prebuf_started = std::time::Instant::now();
-        let (initial_bytes, container) = tokio::task::spawn_blocking(move || {
-            use std::io::Read;
-            let mut initial = Vec::with_capacity(192_000);
-            let mut temp_buf = [0u8; 16384];
-            while initial.len() < 192_000 {
-                match container.read(&mut temp_buf) {
-                    Ok(0) => break,
-                    Ok(n) => initial.extend_from_slice(&temp_buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => {
-                        warn!("[Voice] Error pre-buffering audio: {}", e);
-                        break;
-                    }
-                }
-            }
-            (initial, container)
-        })
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
-        info!(
-            target: "voice",
-            guild_id = guild_id,
-            duration_ms = prebuf_ms,
-            bytes = initial_bytes.len(),
-            track = %song.title,
-            "[Voice] Pre-buffered '{}' ({} bytes in {}ms)",
-            song.title,
-            initial_bytes.len(),
-            prebuf_ms
-        );
+        // Fallback if cached direct stream URL expired or returned 0 bytes
+        if initial_bytes.is_empty() && song.stream_url.is_some() {
+            warn!(
+                target: "voice",
+                guild_id = guild_id,
+                track = %song.title,
+                "[Voice] Direct stream URL yielded 0 bytes for '{}', falling back to yt-dlp pipe",
+                song.title
+            );
+            drop(container);
+            let pipe_container = Self::spawn_ytdlp_ffmpeg_pipeline(&song.url)?;
+            let prebuf_started = std::time::Instant::now();
+            let (bytes, c) = Self::prebuffer_audio(pipe_container).await?;
+            let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
+            info!(
+                target: "voice",
+                guild_id = guild_id,
+                duration_ms = prebuf_ms,
+                bytes = bytes.len(),
+                mode = "ytdlp_pipe_fallback",
+                track = %song.title,
+                "[Voice] Fallback pre-buffered '{}' ({} bytes in {}ms)",
+                song.title,
+                bytes.len(),
+                prebuf_ms
+            );
+            initial_bytes = bytes;
+            container = c;
+        }
 
         // Verify if playback state was cancelled/changed during pre-buffer
         let state_arc = self.get_or_create_state(guild_id).await;
@@ -353,10 +327,11 @@ impl VoiceManager {
             let _ = handle.set_volume(state.volume);
         }
 
-        // Register track end event
+        // Register track end event bound to this specific track UUID so stale End events never skip newer tracks
         let notifier = TrackEndNotifier {
             manager: self.clone(),
             guild_id,
+            track_uuid: handle.uuid(),
         };
 
         let _ = handle.add_event(Event::Track(TrackEvent::End), notifier);
@@ -494,25 +469,14 @@ impl VoiceManager {
     pub async fn clear(&self, guild_id: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let state_arc = self.get_or_create_state(guild_id).await;
         let mut state = state_arc.write().await;
-        let cur_idx = state.queue_index as usize;
-        if cur_idx < state.queue.len() {
-            state.queue.truncate(cur_idx + 1);
-        } else {
-            state.queue.clear();
-        }
+        state.clear_queue_preserving_active();
         Ok(())
     }
 
     pub async fn remove(&self, guild_id: u64, index: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let state_arc = self.get_or_create_state(guild_id).await;
         let mut state = state_arc.write().await;
-        if index > 0 && index <= state.queue.len() {
-            let zero_idx = index - 1;
-            state.queue.remove(zero_idx);
-            if (zero_idx as i32) < state.queue_index {
-                state.queue_index -= 1;
-            }
-        }
+        state.remove_queue_item(index);
         Ok(())
     }
 
@@ -713,11 +677,134 @@ impl VoiceManager {
             }
         }
     }
+    fn spawn_direct_ffmpeg(
+        stream_url: &str,
+        user_agent: Option<&str>,
+    ) -> Result<songbird::input::ChildContainer, Box<dyn std::error::Error + Send + Sync>> {
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args([
+            "-v",
+            "warning",
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+        ]);
+        if let Some(ua) = user_agent {
+            cmd.args(["-user_agent", ua]);
+        }
+        cmd.args([
+            "-vn",
+            "-i",
+            stream_url,
+            "-f",
+            "f32le",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "pipe:1",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+
+        let ffmpeg = cmd.spawn()?;
+        Ok(songbird::input::ChildContainer::from(vec![ffmpeg]))
+    }
+
+    fn spawn_ytdlp_ffmpeg_pipeline(
+        song_url: &str,
+    ) -> Result<songbird::input::ChildContainer, Box<dyn std::error::Error + Send + Sync>> {
+        let mut ytdl = std::process::Command::new("yt-dlp")
+            .args([
+                "--extractor-args",
+                "youtube:player_client=android_vr",
+                "-o",
+                "-",
+                "-f",
+                crate::services::youtube::AUDIO_FORMAT_SPEC,
+                "--no-warnings",
+                song_url,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
+
+        let ytdl_stdout = ytdl.stdout.take().ok_or("Failed to capture yt-dlp stdout")?;
+
+        let ffmpeg = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "warning",
+                "-vn",
+                "-i",
+                "pipe:0",
+                "-f",
+                "f32le",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "pipe:1",
+            ])
+            .stdin(ytdl_stdout)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
+
+        Ok(songbird::input::ChildContainer::from(vec![ytdl, ffmpeg]))
+    }
+
+    async fn prebuffer_audio(
+        mut container: songbird::input::ChildContainer,
+    ) -> Result<(Vec<u8>, songbird::input::ChildContainer), Box<dyn std::error::Error + Send + Sync>> {
+        // Pre-buffer ~0.5s of audio (192,000 bytes of f32le stereo 48kHz PCM) in a worker thread
+        // before attaching to the Songbird mixer to prevent mixer blocking and frame drops.
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut initial = Vec::with_capacity(192_000);
+            let mut temp_buf = [0u8; 16384];
+            while initial.len() < 192_000 {
+                match container.read(&mut temp_buf) {
+                    Ok(0) => break,
+                    Ok(n) => initial.extend_from_slice(&temp_buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        warn!("[Voice] Error pre-buffering audio: {}", e);
+                        break;
+                    }
+                }
+            }
+            (initial, container)
+        })
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    pub async fn handle_track_end(self: &Arc<Self>, guild_id: u64, track_uuid: uuid::Uuid) {
+        let is_current_track = {
+            let state_arc = self.get_or_create_state(guild_id).await;
+            let state = state_arc.read().await;
+            state.track_handle.as_ref().map(|h| h.uuid()) == Some(track_uuid)
+        };
+
+        if is_current_track {
+            let _ = self.play_next(guild_id).await;
+        } else {
+            info!(
+                "[Voice] Ignoring stale TrackEnd event for guild {} (track_uuid={})",
+                guild_id, track_uuid
+            );
+        }
+    }
 }
 
 struct TrackEndNotifier {
     manager: Arc<VoiceManager>,
     guild_id: u64,
+    track_uuid: uuid::Uuid,
 }
 
 #[async_trait]
@@ -732,8 +819,9 @@ impl EventHandler for TrackEndNotifier {
             }
             let mgr = self.manager.clone();
             let gid = self.guild_id;
+            let tid = self.track_uuid;
             tokio::spawn(async move {
-                let _ = mgr.play_next(gid).await;
+                mgr.handle_track_end(gid, tid).await;
             });
         }
         None
