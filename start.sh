@@ -39,8 +39,8 @@ if [ "${#MISSING_LOGGING_SERVICES[@]}" -gt 0 ]; then
     echo "Turn on the systemd logging services with:" >&2
     echo "  sudo systemctl enable --now victoria-logs.service systemd-journal-upload.service" >&2
     echo "" >&2
-    echo "If not installed yet on this host, run the centralized TECHSTACK installer:" >&2
-    echo "  sudo bash <TECHSTACK_REPO>/observability/install.sh" >&2
+    echo "If not installed yet on this host, run the one-line TECHSTACK installer:" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/AnhNTSE183225/techstack/main/observability/install.sh | sudo bash" >&2
     echo "==================================================" >&2
     exit 1
 fi
