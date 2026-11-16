@@ -58,4 +58,6 @@ if command -v fuser >/dev/null 2>&1; then
     fuser -k 8000/tcp >/dev/null 2>&1 || true
 fi
 
+# Note: Decoupled host observability services (victoria-logs.service, systemd-journal-upload.service)
+# are intentionally NOT stopped here so shutdown/exit/crash logs remain captured and queryable.
 echo "OK: MusicBot services stopped."

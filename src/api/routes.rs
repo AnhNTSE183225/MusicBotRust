@@ -1513,30 +1513,3 @@ pub async fn respond_schedule(
         None => Err((StatusCode::NOT_FOUND, Json(json!({ "detail": "Event not found" })))),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Logs
-// ---------------------------------------------------------------------------
-
-pub async fn get_logs(
-    headers: HeaderMap,
-    Query(q): Query<AuthQuery>,
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let _ = extract_session(&headers, Some(&q), &state).await?;
-    let log_candidates = ["logs/musicbot.log", "logs/start.log", "logs/bot_runner.log"];
-    let mut logs = "No log file found.".to_string();
-
-    for path in log_candidates {
-        if std::path::Path::new(path).exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let lines: Vec<&str> = content.lines().collect();
-                let tail_count = lines.len().min(200);
-                logs = lines[lines.len() - tail_count..].join("\n");
-                break;
-            }
-        }
-    }
-
-    Ok(logs)
-}

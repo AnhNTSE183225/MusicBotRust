@@ -1,6 +1,8 @@
 use std::process::Stdio;
+use std::time::Instant;
 use regex::Regex;
 use tokio::process::Command;
+use tracing::{info, warn};
 use crate::models::{PlaylistPreviewResponse, PlaylistTrackItem, Song};
 
 pub fn sanitize_query(query: &str) -> String {
@@ -31,6 +33,7 @@ pub fn build_yt_music_search_url(query: &str) -> String {
 async fn fetch_direct_metadata(
     target: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
     let output = Command::new("yt-dlp")
         .arg("--dump-json")
         .arg("--no-playlist")
@@ -41,10 +44,27 @@ async fn fetch_direct_metadata(
         .output()
         .await?;
 
+    let duration_ms = started.elapsed().as_millis() as u64;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            target: "youtube",
+            duration_ms = duration_ms,
+            query = %target,
+            "[YouTube] yt-dlp direct metadata failed ({}ms): {}",
+            duration_ms,
+            err.trim()
+        );
         return Err(format!("yt-dlp metadata extraction failed: {}", err).into());
     }
+
+    info!(
+        target: "youtube",
+        duration_ms = duration_ms,
+        query = %target,
+        "[YouTube] Extracted direct metadata in {}ms",
+        duration_ms
+    );
 
     let json_str = String::from_utf8_lossy(&output.stdout);
     let val: serde_json::Value = serde_json::from_str(&json_str)?;
@@ -103,21 +123,50 @@ pub async fn extract_song_metadata(
     requester_name: Option<String>,
     requester_avatar: Option<String>,
 ) -> Result<Song, Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
     let clean = sanitize_query(query);
 
     let val = if is_youtube_link(&clean) {
         fetch_direct_metadata(&clean).await?
     } else {
         // 1. Prioritize YouTube Music with '#songs' tab filter (official studio songs vs M/Vs)
+        let search_started = Instant::now();
         let resolved_target = match search_yt_music(&clean).await {
-            Some(url) => url,
-            None => format!("ytsearch1:{}", clean),
+            Some(url) => {
+                info!(
+                    target: "youtube",
+                    duration_ms = search_started.elapsed().as_millis() as u64,
+                    query = %clean,
+                    "[YouTube] YTM search resolved in {}ms",
+                    search_started.elapsed().as_millis()
+                );
+                url
+            }
+            None => {
+                warn!(
+                    target: "youtube",
+                    duration_ms = search_started.elapsed().as_millis() as u64,
+                    query = %clean,
+                    "[YouTube] YTM search fallback to ytsearch1 after {}ms",
+                    search_started.elapsed().as_millis()
+                );
+                format!("ytsearch1:{}", clean)
+            }
         };
 
         fetch_direct_metadata(&resolved_target).await?
     };
 
     let title = val.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown Title").to_string();
+    let total_ms = started.elapsed().as_millis() as u64;
+    info!(
+        target: "youtube",
+        duration_ms = total_ms,
+        title = %title,
+        "[YouTube] Song metadata ready in {}ms: {}",
+        total_ms,
+        title
+    );
     let artist = val.get("artist")
         .or_else(|| val.get("uploader"))
         .or_else(|| val.get("channel"))
@@ -145,6 +194,7 @@ pub async fn extract_song_metadata(
 }
 
 pub async fn preview_playlist(url: &str) -> Result<PlaylistPreviewResponse, Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
     let clean = sanitize_query(url);
 
     let output = Command::new("yt-dlp")
@@ -156,10 +206,27 @@ pub async fn preview_playlist(url: &str) -> Result<PlaylistPreviewResponse, Box<
         .output()
         .await?;
 
+    let duration_ms = started.elapsed().as_millis() as u64;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            target: "youtube",
+            duration_ms = duration_ms,
+            url = %clean,
+            "[YouTube] Playlist preview failed ({}ms): {}",
+            duration_ms,
+            err.trim()
+        );
         return Err(format!("yt-dlp playlist extraction failed: {}", err).into());
     }
+
+    info!(
+        target: "youtube",
+        duration_ms = duration_ms,
+        url = %clean,
+        "[YouTube] Playlist preview extracted in {}ms",
+        duration_ms
+    );
 
     let json_str = String::from_utf8_lossy(&output.stdout);
     let val: serde_json::Value = serde_json::from_str(&json_str)?;

@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use axum::{
+    extract::Request,
     http::{header, Method},
+    middleware::{self, Next},
+    response::Response,
     routing::{delete, get, post, put},
     Router,
 };
@@ -13,6 +16,7 @@ use serenity::all::{Cache, Http};
 use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use tracing::{info, warn};
 use crate::config::AppConfig;
 use crate::services::lyrics::LyricsService;
 use crate::services::schedule::ScheduleService;
@@ -86,8 +90,48 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/schedule/{guild_id}", get(routes::get_schedule).post(routes::create_schedule))
         .route("/api/schedule/{guild_id}/{event_id}", put(routes::update_schedule).delete(routes::delete_schedule))
         .route("/api/schedule/{guild_id}/{event_id}/respond", post(routes::respond_schedule))
-        .route("/api/logs", get(routes::get_logs))
         .layer(cors)
+        .layer(middleware::from_fn(track_request_latency))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn track_request_latency(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let started = Instant::now();
+
+    let res = next.run(req).await;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let status = res.status().as_u16();
+
+    if duration_ms >= 1000 {
+        warn!(
+            target: "http_latency",
+            method = %method,
+            path = %path,
+            status = status,
+            duration_ms = duration_ms,
+            "[HTTP Slow] {} {} -> {} ({}ms)",
+            method,
+            path,
+            status,
+            duration_ms
+        );
+    } else {
+        info!(
+            target: "http_latency",
+            method = %method,
+            path = %path,
+            status = status,
+            duration_ms = duration_ms,
+            "[HTTP] {} {} -> {} ({}ms)",
+            method,
+            path,
+            status,
+            duration_ms
+        );
+    }
+
+    res
 }

@@ -15,7 +15,38 @@ echo "=================================================="
 echo "    MusicBot Background Runner (Linux)            "
 echo "=================================================="
 
-# 1. Stop existing process if running
+# 1. Verify decoupled host logging systemd services are active
+MISSING_LOGGING_SERVICES=()
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "ERROR: 'systemctl' not found. Linux production observability requires systemd." >&2
+    echo "Install and enable the centralized TECHSTACK logging stack (observability/install.sh) first." >&2
+    exit 1
+fi
+
+for svc in victoria-logs.service systemd-journal-upload.service; do
+    if ! systemctl is-active --quiet "$svc"; then
+        MISSING_LOGGING_SERVICES+=("$svc")
+    fi
+done
+
+if [ "${#MISSING_LOGGING_SERVICES[@]}" -gt 0 ]; then
+    echo "==================================================" >&2
+    echo "ERROR: Required logging systemd service(s) are NOT running:" >&2
+    for svc in "${MISSING_LOGGING_SERVICES[@]}"; do
+        echo "  - $svc" >&2
+    done
+    echo "" >&2
+    echo "Turn on the systemd logging services with:" >&2
+    echo "  sudo systemctl enable --now victoria-logs.service systemd-journal-upload.service" >&2
+    echo "" >&2
+    echo "If not installed yet on this host, run the centralized TECHSTACK installer:" >&2
+    echo "  sudo bash <TECHSTACK_REPO>/observability/install.sh" >&2
+    echo "==================================================" >&2
+    exit 1
+fi
+echo "OK: Host observability active (victoria-logs.service + systemd-journal-upload.service)."
+
+# 2. Stop existing process if running
 if [ -f "$PID_FILE" ]; then
     OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
@@ -64,10 +95,15 @@ if [ "${DISCORD_PROFILE:-DEV}" = "DEV" ]; then
 else
     export RUST_LOG="${RUST_LOG:-musicbot=info,tower_http=info,songbird=info}"
 fi
+export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
-# 4. Start in background
+# 5. Start in background (stream all stdout/stderr—including panics & exiting logs—into journald -> VictoriaLogs)
 echo "Starting MusicBot in background..."
-nohup "$RELEASE_BIN" >> "$RUNNER_LOG" 2>&1 &
+if command -v systemd-cat >/dev/null 2>&1; then
+    nohup "$RELEASE_BIN" < /dev/null > >(tee -a "$RUNNER_LOG" | systemd-cat -t musicbot) 2>&1 &
+else
+    nohup "$RELEASE_BIN" < /dev/null >> "$RUNNER_LOG" 2>&1 &
+fi
 BOT_PID=$!
 echo "$BOT_PID" > "$PID_FILE"
 

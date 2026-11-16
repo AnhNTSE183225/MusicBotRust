@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Instant;
 use reqwest::Client;
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -92,16 +93,32 @@ pub async fn generate_search_queries(
             ]
         });
 
+        let started = Instant::now();
         let res = match client.post(&url).json(&contents).send().await {
             Ok(r) => r,
             Err(e) => {
-                warn!("[AI] Request failed with key {}: {}", db::mask_key(&api_key), e);
+                warn!(
+                    target: "ai",
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    attempt = attempts,
+                    "[AI] Request failed with key {}: {}",
+                    db::mask_key(&api_key),
+                    e
+                );
                 continue;
             }
         };
 
         let status = res.status();
+        let duration_ms = started.elapsed().as_millis() as u64;
         if status.is_success() {
+            info!(
+                target: "ai",
+                duration_ms = duration_ms,
+                attempt = attempts,
+                "[AI] Gemini query generation succeeded in {}ms",
+                duration_ms
+            );
             db::mark_gemini_key_used(pool, &api_key).await;
             let val: serde_json::Value = res.json().await?;
             if let Some(text) = val.get("candidates")

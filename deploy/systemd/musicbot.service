@@ -1,0 +1,25 @@
+[Unit]
+Description=MusicBot Rust Backend Service
+After=network-online.target victoria-logs.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=theanh
+WorkingDirectory=/home/theanh/workspace/MusicBotRust
+EnvironmentFile=/home/theanh/workspace/MusicBotRust/.env
+ExecStart=/home/theanh/workspace/MusicBotRust/target/release/musicbot
+Restart=always
+RestartSec=5
+
+# Capture 100% of stdout/stderr (startup, panics, ffmpeg/yt-dlp stderr, shutdown) into journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=musicbot
+
+# Preserve panic backtrace symbols (paired with strip = "debuginfo" in Cargo.toml)
+Environment=RUST_BACKTRACE=1
+Environment=DISCORD_PROFILE=PROD
+
+[Install]
+WantedBy=multi-user.target

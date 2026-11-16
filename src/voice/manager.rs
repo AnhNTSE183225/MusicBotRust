@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::Client;
-use serenity::all::{Cache, ChannelId, GuildId, UserId};
+use serenity::all::{Cache, ChannelId, GuildId};
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
 use songbird::Songbird;
 use sqlx::SqlitePool;
@@ -256,7 +256,7 @@ impl VoiceManager {
                 &song.url,
             ])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
             .spawn()?;
 
         let ytdl_stdout = ytdl.stdout.take().ok_or("Failed to capture yt-dlp stdout")?;
@@ -278,7 +278,7 @@ impl VoiceManager {
             ])
             .stdin(ytdl_stdout)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
             .spawn()?;
 
         let mut container = songbird::input::ChildContainer::from(vec![ytdl, ffmpeg]);
@@ -286,6 +286,7 @@ impl VoiceManager {
         // Pre-buffer ~0.5s of audio (192,000 bytes of f32le stereo 48kHz PCM) in a worker thread
         // before attaching to the Songbird mixer. This eliminates mixer thread blocking on yt-dlp startup,
         // clock-skew frame drops, and prevents the initial 5 seconds from skipping in Discord.
+        let prebuf_started = std::time::Instant::now();
         let (initial_bytes, container) = tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut initial = Vec::with_capacity(192_000);
@@ -305,6 +306,19 @@ impl VoiceManager {
         })
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
+        info!(
+            target: "voice",
+            guild_id = guild_id,
+            duration_ms = prebuf_ms,
+            bytes = initial_bytes.len(),
+            track = %song.title,
+            "[Voice] Pre-buffered '{}' ({} bytes in {}ms)",
+            song.title,
+            initial_bytes.len(),
+            prebuf_ms
+        );
 
         // Verify if playback state was cancelled/changed during pre-buffer
         let state_arc = self.get_or_create_state(guild_id).await;

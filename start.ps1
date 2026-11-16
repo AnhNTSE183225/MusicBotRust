@@ -106,6 +106,7 @@ if ($discordProfile -eq "DEV") {
 } else {
     if (-not $env:RUST_LOG) { $env:RUST_LOG = "musicbot=info,tower_http=info,songbird=info" }
 }
+if (-not $env:RUST_BACKTRACE) { $env:RUST_BACKTRACE = "1" }
 
 if ($Foreground) {
     Set-Content -Path $pidFile -Value $PID

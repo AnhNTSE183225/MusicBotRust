@@ -31,10 +31,16 @@ impl EventHandler for BotEventHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Load Configuration
-    let config = AppConfig::load()?;
+    // 1. Load Configuration (emit explicit stderr on failure so journald captures early boot errors)
+    let config = match AppConfig::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("[Startup Error] Failed to load configuration: {:?}", e);
+            return Err(e);
+        }
+    };
 
-    // 2. Initialize Tracing with profile-aware level
+    // 2. Initialize Tracing with profile-aware level & format (JSON in PROD for VictoriaLogs LogsQL)
     let default_filter = if config.discord_profile == "DEV" || config.log_level.to_uppercase() == "DEBUG" {
         "musicbot=debug,tower_http=debug,axum=debug,songbird=info"
     } else {
@@ -42,11 +48,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
+    let use_json = config.discord_profile == "PROD"
+        || std::env::var("LOG_FORMAT")
+            .map(|v| v.eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(env_filter))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    if use_json {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(env_filter))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(false),
+            )
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(env_filter))
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
+    install_panic_hook();
 
     info!("Starting MusicBot (Rust Engine)...");
     info!("Active Discord Profile: {}", config.discord_profile);
@@ -156,4 +180,35 @@ async fn shutdown_signal() {
         },
     }
     info!("Shutdown signal received, shutting down gracefully...");
+}
+
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let location = panic_info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "non-string panic payload"
+        };
+
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        error!(
+            target: "panic",
+            location = %location,
+            payload = %payload,
+            backtrace = %backtrace,
+            "[PANIC] Unrecoverable panic at {}: {}",
+            location,
+            payload
+        );
+
+        default_hook(panic_info);
+    }));
 }
