@@ -26,6 +26,7 @@ pub struct GuildMusicState {
     pub ai_prompt: String,
     pub ai_set_by_name: Option<String>,
     pub ai_set_by_avatar: Option<String>,
+    pub playback_error: Option<String>,
 }
 
 impl GuildMusicState {
@@ -51,6 +52,7 @@ impl GuildMusicState {
             ai_prompt: String::new(),
             ai_set_by_name: None,
             ai_set_by_avatar: None,
+            playback_error: None,
         }
     }
 
@@ -105,6 +107,7 @@ impl GuildMusicState {
         if matches!(self.status, PlaybackStatus::Idle | PlaybackStatus::Disconnected) {
             self.queue.clear();
             self.queue_index = -1;
+            self.playback_error = None;
         } else {
             let cur_idx = self.queue_index as usize;
             if cur_idx < self.queue.len() {
@@ -112,6 +115,31 @@ impl GuildMusicState {
             } else {
                 self.queue.clear();
                 self.queue_index = -1;
+            }
+        }
+    }
+
+    pub fn mark_current_track_failed(&mut self, song_title: &str, reason: &str) {
+        let friendly = format!("'{}' is unavailable or having issues: {}", song_title, reason);
+        if self.queue_index >= 0 {
+            if let Some(track) = self.queue.get_mut(self.queue_index as usize) {
+                track.error = Some(reason.to_string());
+            }
+        }
+        self.playback_error = Some(friendly);
+        self.track_handle = None;
+        self.current_song = None;
+        self.transition_to(
+            PlaybackStatus::Idle,
+            format!("audio stream failed for '{}'", song_title),
+        );
+    }
+
+    pub fn clear_track_error(&mut self) {
+        self.playback_error = None;
+        if self.queue_index >= 0 {
+            if let Some(track) = self.queue.get_mut(self.queue_index as usize) {
+                track.error = None;
             }
         }
     }
@@ -222,6 +250,7 @@ impl GuildMusicState {
             ai_prompt: self.ai_prompt.clone(),
             ai_set_by_name: self.ai_set_by_name.clone(),
             ai_set_by_avatar: self.ai_set_by_avatar.clone(),
+            playback_error: self.playback_error.clone(),
         }
     }
 }
@@ -242,6 +271,7 @@ mod tests {
             requester_avatar: None,
             requester_handle: None,
             queue_id: None,
+            error: None,
             stream_url: None,
             stream_user_agent: None,
         }
@@ -306,5 +336,29 @@ mod tests {
         state.clear_queue_preserving_active();
         assert!(state.queue.is_empty());
         assert_eq!(state.queue_index, -1);
+    }
+
+    #[test]
+    fn mark_current_track_failed_records_error_and_marks_queue_entry() {
+        let mut state = GuildMusicState::new(1, 0.75);
+        state.queue.push(sample_song("broken_vid"));
+        state.advance_next_track();
+        state.mark_current_track_failed("broken_vid", "Unavailable (HTTP 403)");
+
+        assert_eq!(state.status, PlaybackStatus::Idle);
+        assert!(state.current_song.is_none());
+        assert_eq!(
+            state.queue[0].error.as_deref(),
+            Some("Unavailable (HTTP 403)")
+        );
+        assert!(state
+            .playback_error
+            .as_deref()
+            .unwrap()
+            .contains("broken_vid"));
+
+        state.clear_track_error();
+        assert!(state.playback_error.is_none());
+        assert!(state.queue[0].error.is_none());
     }
 }

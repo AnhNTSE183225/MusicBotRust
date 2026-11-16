@@ -17,6 +17,8 @@ pub struct Song {
     pub requester_handle: Option<String>,
     #[serde(default)]
     pub queue_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
     #[serde(skip)]
     pub stream_url: Option<String>,
     #[serde(skip)]
@@ -68,6 +70,8 @@ pub struct QueueStateResponse {
     pub ai_set_by_name: Option<String>,
     #[serde(default)]
     pub ai_set_by_avatar: Option<String>,
+    #[serde(default)]
+    pub playback_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +345,7 @@ mod tests {
             requester_avatar: None,
             requester_handle: None,
             queue_id: None,
+            error: None,
             stream_url: Some("https://rr1---sn.googlevideo.com/secret-token".to_string()),
             stream_user_agent: Some("Mozilla/5.0".to_string()),
         };

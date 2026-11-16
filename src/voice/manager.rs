@@ -101,6 +101,7 @@ impl VoiceManager {
         state.current_song = None;
         state.queue.clear();
         state.queue_index = -1;
+        state.playback_error = None;
         state.skip_votes.clear();
         state.pause_votes.clear();
         state.resume_votes.clear();
@@ -226,73 +227,24 @@ impl VoiceManager {
             state.transition_to(PlaybackStatus::Loading, format!("buffering stream for '{}'", song.title));
         }
 
-        let (mut initial_bytes, mut container) = if let Some(direct_url) = &song.stream_url {
-            let direct_container = Self::spawn_direct_ffmpeg(direct_url, song.stream_user_agent.as_deref())?;
-            let prebuf_started = std::time::Instant::now();
-            let (bytes, c) = Self::prebuffer_audio(direct_container).await?;
-            let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
-            info!(
-                target: "voice",
-                guild_id = guild_id,
-                duration_ms = prebuf_ms,
-                bytes = bytes.len(),
-                mode = "direct_stream_url",
-                track = %song.title,
-                "[Voice] Pre-buffered '{}' via direct URL ({} bytes in {}ms)",
-                song.title,
-                bytes.len(),
-                prebuf_ms
-            );
-            (bytes, c)
-        } else {
-            let pipe_container = Self::spawn_ytdlp_ffmpeg_pipeline(&song.url)?;
-            let prebuf_started = std::time::Instant::now();
-            let (bytes, c) = Self::prebuffer_audio(pipe_container).await?;
-            let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
-            info!(
-                target: "voice",
-                guild_id = guild_id,
-                duration_ms = prebuf_ms,
-                bytes = bytes.len(),
-                mode = "ytdlp_pipe",
-                track = %song.title,
-                "[Voice] Pre-buffered '{}' via yt-dlp pipe ({} bytes in {}ms)",
-                song.title,
-                bytes.len(),
-                prebuf_ms
-            );
-            (bytes, c)
+        let (initial_bytes, container) = match self.open_audio_stream(guild_id, &song).await? {
+            Some(stream) => stream,
+            None => {
+                error!(
+                    target: "voice",
+                    guild_id = guild_id,
+                    track = %song.title,
+                    url = %song.url,
+                    "[Voice] All stream client fallbacks yielded 0 bytes for '{}'",
+                    song.title
+                );
+                let reason = "All YouTube stream sources failed (video unavailable or blocked with HTTP 403).";
+                let state_arc = self.get_or_create_state(guild_id).await;
+                let mut state = state_arc.write().await;
+                state.mark_current_track_failed(&song.title, reason);
+                return Err(format!("'{}' is unavailable or having issues: {}", song.title, reason).into());
+            }
         };
-
-        // Fallback if cached direct stream URL expired or returned 0 bytes
-        if initial_bytes.is_empty() && song.stream_url.is_some() {
-            warn!(
-                target: "voice",
-                guild_id = guild_id,
-                track = %song.title,
-                "[Voice] Direct stream URL yielded 0 bytes for '{}', falling back to yt-dlp pipe",
-                song.title
-            );
-            drop(container);
-            let pipe_container = Self::spawn_ytdlp_ffmpeg_pipeline(&song.url)?;
-            let prebuf_started = std::time::Instant::now();
-            let (bytes, c) = Self::prebuffer_audio(pipe_container).await?;
-            let prebuf_ms = prebuf_started.elapsed().as_millis() as u64;
-            info!(
-                target: "voice",
-                guild_id = guild_id,
-                duration_ms = prebuf_ms,
-                bytes = bytes.len(),
-                mode = "ytdlp_pipe_fallback",
-                track = %song.title,
-                "[Voice] Fallback pre-buffered '{}' ({} bytes in {}ms)",
-                song.title,
-                bytes.len(),
-                prebuf_ms
-            );
-            initial_bytes = bytes;
-            container = c;
-        }
 
         // Verify if playback state was cancelled/changed during pre-buffer
         let state_arc = self.get_or_create_state(guild_id).await;
@@ -339,6 +291,7 @@ impl VoiceManager {
         {
             let mut state = state_arc.write().await;
             state.track_handle = Some(handle);
+            state.clear_track_error();
             state.transition_to(PlaybackStatus::Playing, format!("playing track '{}'", song.title));
             state.skip_votes.clear();
             state.pause_votes.clear();
@@ -459,6 +412,7 @@ impl VoiceManager {
         state.queue.clear();
         state.current_song = None;
         state.queue_index = -1;
+        state.playback_error = None;
         state.skip_votes.clear();
         state.pause_votes.clear();
         state.resume_votes.clear();
@@ -714,13 +668,93 @@ impl VoiceManager {
         Ok(songbird::input::ChildContainer::from(vec![ffmpeg]))
     }
 
+    /// Attempts cached direct ffmpeg playback first, then iterates through yt-dlp pipe client
+    /// strategies whenever a stream yields 0 bytes (e.g. HTTP 403 Forbidden or expired URL).
+    async fn open_audio_stream(
+        &self,
+        guild_id: u64,
+        song: &Song,
+    ) -> Result<Option<(Vec<u8>, songbird::input::ChildContainer)>, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(direct_url) = &song.stream_url {
+            let started = std::time::Instant::now();
+            let direct_container = Self::spawn_direct_ffmpeg(direct_url, song.stream_user_agent.as_deref())?;
+            let (bytes, container) = Self::prebuffer_audio(direct_container).await?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            if !bytes.is_empty() {
+                info!(
+                    target: "voice",
+                    guild_id = guild_id,
+                    duration_ms = elapsed_ms,
+                    bytes = bytes.len(),
+                    mode = "direct_stream_url",
+                    track = %song.title,
+                    "[Voice] Pre-buffered '{}' via direct URL ({} bytes in {}ms)",
+                    song.title,
+                    bytes.len(),
+                    elapsed_ms
+                );
+                return Ok(Some((bytes, container)));
+            }
+            drop(container);
+            warn!(
+                target: "voice",
+                guild_id = guild_id,
+                duration_ms = elapsed_ms,
+                track = %song.title,
+                "[Voice] Direct stream URL yielded 0 bytes for '{}', cascading through yt-dlp fallbacks",
+                song.title
+            );
+        }
+
+        for strategy in crate::services::youtube::PIPE_CLIENT_STRATEGIES {
+            let label = strategy.unwrap_or("default");
+            let started = std::time::Instant::now();
+            let pipe_container = Self::spawn_ytdlp_ffmpeg_pipeline(&song.url, *strategy)?;
+            let (bytes, container) = Self::prebuffer_audio(pipe_container).await?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            if !bytes.is_empty() {
+                info!(
+                    target: "voice",
+                    guild_id = guild_id,
+                    duration_ms = elapsed_ms,
+                    bytes = bytes.len(),
+                    mode = "ytdlp_pipe",
+                    client = label,
+                    track = %song.title,
+                    "[Voice] Pre-buffered '{}' via yt-dlp pipe [client={}] ({} bytes in {}ms)",
+                    song.title,
+                    label,
+                    bytes.len(),
+                    elapsed_ms
+                );
+                return Ok(Some((bytes, container)));
+            }
+            drop(container);
+            warn!(
+                target: "voice",
+                guild_id = guild_id,
+                duration_ms = elapsed_ms,
+                client = label,
+                track = %song.title,
+                "[Voice] yt-dlp pipe [client={}] yielded 0 bytes for '{}', trying next fallback",
+                label,
+                song.title
+            );
+        }
+
+        Ok(None)
+    }
+
     fn spawn_ytdlp_ffmpeg_pipeline(
         song_url: &str,
+        player_clients: Option<&str>,
     ) -> Result<songbird::input::ChildContainer, Box<dyn std::error::Error + Send + Sync>> {
-        let mut ytdl = std::process::Command::new("yt-dlp")
+        let mut ytdl_cmd = std::process::Command::new("yt-dlp");
+        if let Some(clients) = player_clients {
+            ytdl_cmd.args(["--extractor-args", &format!("youtube:player_client={}", clients)]);
+        }
+        let mut ytdl = ytdl_cmd
             .args([
-                "--extractor-args",
-                "youtube:player_client=android_vr",
                 "-o",
                 "-",
                 "-f",

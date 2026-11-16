@@ -30,7 +30,43 @@ pub fn build_yt_music_search_url(query: &str) -> String {
     )
 }
 
+pub fn format_unavailable_reason(raw_err: &str) -> String {
+    let lower = raw_err.to_lowercase();
+    if lower.contains("private video") {
+        "Video is private and unavailable.".to_string()
+    } else if lower.contains("video unavailable")
+        || lower.contains("this video is not available")
+        || lower.contains("has been removed")
+        || lower.contains("account associated with this video has been terminated")
+    {
+        "Video is unavailable or has been removed from YouTube.".to_string()
+    } else if lower.contains("sign in") || lower.contains("confirm your age") || lower.contains("age-restricted") {
+        "Video requires YouTube sign-in or age verification.".to_string()
+    } else if lower.contains("copyright") {
+        "Video is blocked due to a copyright restriction.".to_string()
+    } else if lower.contains("403") || lower.contains("forbidden") || lower.contains("429") {
+        "Video stream is blocked or rate-limited by YouTube (HTTP 403/429).".to_string()
+    } else if lower.contains("requested format is not available") {
+        "No playable audio stream is available for this video.".to_string()
+    } else {
+        let first_line = raw_err
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().trim_start_matches("ERROR:").trim())
+            .unwrap_or("Unknown extraction error");
+        format!("Video is unavailable or having issues: {}", first_line)
+    }
+}
+
 pub const AUDIO_FORMAT_SPEC: &str = "ba[acodec=opus]/ba[ext=m4a]/ba/bestaudio/best";
+pub const PRIMARY_PLAYER_CLIENT: &str = "android";
+pub const FALLBACK_PLAYER_CLIENTS: &str = "android_vr,mweb,web";
+/// Distinct client strategies tried sequentially when opening a stream yields 0 bytes (e.g. HTTP 403).
+pub const PIPE_CLIENT_STRATEGIES: &[Option<&str>] = &[
+    Some("android,mweb,web"),
+    None, // yt-dlp built-in default client chain
+    Some("tv,mweb,web"),
+];
 
 async fn run_ytdlp_dump_json(
     target: &str,
@@ -55,8 +91,8 @@ async fn fetch_direct_metadata(
     target: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let started = Instant::now();
-    // Use fast single-client android_vr first; fall back to android,mweb,web (skipping broken ios) on failure.
-    let mut client_used = "android_vr";
+    // Use fast single-client android first (avoids android_vr 403s); fall back to android_vr,mweb,web on failure.
+    let mut client_used = PRIMARY_PLAYER_CLIENT;
     let mut output = run_ytdlp_dump_json(target, client_used).await?;
 
     if !output.status.success() {
@@ -65,10 +101,12 @@ async fn fetch_direct_metadata(
             target: "youtube",
             duration_ms = started.elapsed().as_millis() as u64,
             query = %target,
-            "[YouTube] android_vr client failed, retrying with fallback clients: {}",
+            client = client_used,
+            "[YouTube] {} client failed, retrying with fallback clients: {}",
+            client_used,
             primary_err.trim()
         );
-        client_used = "android,mweb,web";
+        client_used = FALLBACK_PLAYER_CLIENTS;
         output = run_ytdlp_dump_json(target, client_used).await?;
     }
 
@@ -84,7 +122,7 @@ async fn fetch_direct_metadata(
             duration_ms,
             err.trim()
         );
-        return Err(format!("yt-dlp metadata extraction failed: {}", err).into());
+        return Err(format_unavailable_reason(&err).into());
     }
 
     let json_str = String::from_utf8_lossy(&output.stdout);
@@ -233,6 +271,7 @@ pub async fn extract_song_metadata(
         requester_name,
         requester_avatar,
         queue_id: Some(uuid::Uuid::new_v4().to_string()),
+        error: None,
         stream_url,
         stream_user_agent,
     })
@@ -321,4 +360,25 @@ pub async fn preview_playlist(url: &str) -> Result<PlaylistPreviewResponse, Box<
         total_tracks: total,
         tracks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_reason_formats_known_errors_cleanly() {
+        assert_eq!(
+            format_unavailable_reason("ERROR: [youtube] xyz: Video unavailable"),
+            "Video is unavailable or has been removed from YouTube."
+        );
+        assert_eq!(
+            format_unavailable_reason("ERROR: Private video. Sign in if you've been granted access"),
+            "Video is private and unavailable."
+        );
+        assert_eq!(
+            format_unavailable_reason("ERROR: unable to download video data: HTTP Error 403: Forbidden"),
+            "Video stream is blocked or rate-limited by YouTube (HTTP 403/429)."
+        );
+    }
 }

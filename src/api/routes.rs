@@ -948,6 +948,7 @@ pub async fn playlist_add(
                     requester_avatar: requester_avatar.clone(),
                     requester_handle: Some(requester_name.clone()),
                     queue_id: Some(uuid::Uuid::new_v4().to_string()),
+                    error: None,
                     stream_url: None,
                     stream_user_agent: None,
                 });
@@ -975,6 +976,7 @@ pub async fn playlist_add(
                     requester_avatar: requester_avatar.clone(),
                     requester_handle: Some(requester_name.clone()),
                     queue_id: Some(uuid::Uuid::new_v4().to_string()),
+                    error: None,
                     stream_url: None,
                     stream_user_agent: None,
                 });
@@ -1079,6 +1081,7 @@ pub async fn ai_confirm_batch(
             requester_avatar: requester_avatar.clone(),
             requester_handle: Some(requester_name.clone()),
             queue_id: Some(uuid::Uuid::new_v4().to_string()),
+            error: None,
             stream_url: None,
             stream_user_agent: None,
         })
