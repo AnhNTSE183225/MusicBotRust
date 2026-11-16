@@ -101,6 +101,10 @@ pub struct IndexRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistPreviewRequest {
     pub url: String,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +124,10 @@ pub struct PlaylistPreviewResponse {
     pub uploader: String,
     pub thumbnail: String,
     pub total_tracks: usize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub has_more: bool,
     pub tracks: Vec<PlaylistTrackItem>,
 }
 

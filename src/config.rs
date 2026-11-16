@@ -14,6 +14,15 @@ pub struct YamlConfig {
     pub api: Option<ApiConfigYaml>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
+    #[serde(default)]
+    pub ai: Option<AiConfigYaml>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[allow(dead_code)]
+pub struct AiConfigYaml {
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -69,6 +78,7 @@ pub struct AppConfig {
     pub default_volume: f32,
     pub normalize_audio: bool,
     pub log_level: String,
+    pub ai_model: String,
 }
 
 impl AppConfig {
@@ -213,6 +223,19 @@ impl AppConfig {
                 }
             });
 
+        let ai_model = env::var("GEMINI_MODEL")
+            .ok()
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| {
+                yaml_config
+                    .as_ref()
+                    .and_then(|y| y.ai.as_ref())
+                    .and_then(|a| a.model.clone())
+            })
+            .map(|m| m.trim().trim_start_matches("models/").to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "gemini-3.8-flash".to_string());
+
         Ok(Self {
             discord_token,
             discord_client_id,
@@ -228,6 +251,7 @@ impl AppConfig {
             default_volume,
             normalize_audio,
             log_level,
+            ai_model,
         })
     }
 }

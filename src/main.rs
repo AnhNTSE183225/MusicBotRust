@@ -39,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             return Err(e);
         }
     };
+    crate::services::ai::configure_default_model(&config.ai_model);
 
     // 2. Initialize Tracing with profile-aware level & format (JSON in PROD for VictoriaLogs LogsQL)
     let default_filter = if config.discord_profile == "DEV" || config.log_level.to_uppercase() == "DEBUG" {

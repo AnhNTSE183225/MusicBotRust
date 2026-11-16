@@ -277,73 +277,84 @@ pub async fn extract_song_metadata(
     })
 }
 
-pub async fn preview_playlist(url: &str) -> Result<PlaylistPreviewResponse, Box<dyn std::error::Error + Send + Sync>> {
-    let started = Instant::now();
-    let clean = sanitize_query(url);
+pub const DEFAULT_PLAYLIST_PAGE_SIZE: usize = 20;
 
-    let output = Command::new("yt-dlp")
-        .arg("--flat-playlist")
-        .arg("-J")
-        .arg(&clean)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+/// Parses a `yt-dlp --flat-playlist -J` payload sliced via `--playlist-items (offset+1):(offset+limit+1)`.
+pub fn parse_playlist_preview_json(
+    val: &serde_json::Value,
+    offset: usize,
+    limit: usize,
+) -> PlaylistPreviewResponse {
+    let page_limit = limit.clamp(1, 50);
+    let title = val
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("YouTube Playlist")
+        .to_string();
+    let uploader = val
+        .get("uploader")
+        .or_else(|| val.get("channel"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let playlist_thumb = val
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    let duration_ms = started.elapsed().as_millis() as u64;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        warn!(
-            target: "youtube",
-            duration_ms = duration_ms,
-            url = %clean,
-            "[YouTube] Playlist preview failed ({}ms): {}",
-            duration_ms,
-            err.trim()
-        );
-        return Err(format!("yt-dlp playlist extraction failed: {}", err).into());
-    }
+    let entries = val
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
 
-    info!(
-        target: "youtube",
-        duration_ms = duration_ms,
-        url = %clean,
-        "[YouTube] Playlist preview extracted in {}ms",
-        duration_ms
-    );
+    // Requesting page_limit + 1 items lets us detect more tracks even on endless Mix (RD...) feeds
+    // where playlist_count is null.
+    let has_more_from_probe = entries.len() > page_limit;
+    let slice_len = entries.len().min(page_limit);
 
-    let json_str = String::from_utf8_lossy(&output.stdout);
-    let val: serde_json::Value = serde_json::from_str(&json_str)?;
+    let mut tracks = Vec::with_capacity(slice_len);
+    for (i, e) in entries[..slice_len].iter().enumerate() {
+        let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let e_title = e
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Track")
+            .to_string();
+        let artist = e
+            .get("uploader")
+            .or_else(|| e.get("channel"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let duration = e.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let track_url = e
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                if s.starts_with("http") {
+                    s.to_string()
+                } else {
+                    format!("https://www.youtube.com/watch?v={}", s)
+                }
+            })
+            .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={}", id));
+        let thumb = e
+            .get("thumbnail")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", id));
 
-    let title = val.get("title").and_then(|v| v.as_str()).unwrap_or("YouTube Playlist").to_string();
-    let uploader = val.get("uploader").or_else(|| val.get("channel")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let playlist_thumb = val.get("thumbnail").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-    let mut tracks = Vec::new();
-    if let Some(entries) = val.get("entries").and_then(|v| v.as_array()) {
-        for (i, e) in entries.iter().enumerate() {
-            let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let e_title = e.get("title").and_then(|v| v.as_str()).unwrap_or("Track").to_string();
-            let artist = e.get("uploader").or_else(|| e.get("channel")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let duration = e.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let track_url = e.get("url")
-                .and_then(|v| v.as_str())
-                .map(|s| if s.starts_with("http") { s.to_string() } else { format!("https://www.youtube.com/watch?v={}", s) })
-                .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={}", id));
-            let thumb = e.get("thumbnail").and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", id));
-
-            tracks.push(PlaylistTrackItem {
-                index: (i + 1) as i32,
-                id,
-                title: e_title,
-                artist,
-                duration,
-                url: track_url,
-                thumbnail: thumb,
-            });
-        }
+        tracks.push(PlaylistTrackItem {
+            index: (offset + i + 1) as i32,
+            id,
+            title: e_title,
+            artist,
+            duration,
+            url: track_url,
+            thumbnail: thumb,
+        });
     }
 
     let thumbnail = if playlist_thumb.is_empty() && !tracks.is_empty() {
@@ -352,14 +363,94 @@ pub async fn preview_playlist(url: &str) -> Result<PlaylistPreviewResponse, Box<
         playlist_thumb
     };
 
-    let total = tracks.len();
-    Ok(PlaylistPreviewResponse {
+    let known_count = val
+        .get("playlist_count")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let loaded_end = offset + tracks.len();
+    let has_more = has_more_from_probe || known_count.map(|c| loaded_end < c).unwrap_or(false);
+    let total_tracks = known_count.map(|c| c.max(loaded_end)).unwrap_or(loaded_end);
+
+    PlaylistPreviewResponse {
         title,
         uploader,
         thumbnail,
-        total_tracks: total,
+        total_tracks,
+        offset,
+        has_more,
         tracks,
-    })
+    }
+}
+
+pub async fn preview_playlist(
+    url: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<PlaylistPreviewResponse, Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
+    let clean = sanitize_query(url);
+    let page_limit = limit.clamp(1, 50);
+    let start_item = offset + 1;
+    let fetch_end = offset + page_limit + 1;
+    let range_arg = format!("{}:{}", start_item, fetch_end);
+
+    let fut = Command::new("yt-dlp")
+        .arg("--flat-playlist")
+        .args(["--playlist-items", &range_arg])
+        .arg("--no-warnings")
+        .arg("-J")
+        .arg(&clean)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    let output = match tokio::time::timeout(tokio::time::Duration::from_secs(20), fut).await {
+        Ok(res) => res?,
+        Err(_) => {
+            warn!(
+                target: "youtube",
+                duration_ms = started.elapsed().as_millis() as u64,
+                url = %clean,
+                range = %range_arg,
+                "[YouTube] Playlist preview timed out after 20s"
+            );
+            return Err("Playlist preview timed out. Try pasting a public playlist or YouTube Mix URL with a video ID.".into());
+        }
+    };
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            target: "youtube",
+            duration_ms = duration_ms,
+            url = %clean,
+            range = %range_arg,
+            "[YouTube] Playlist preview failed ({}ms): {}",
+            duration_ms,
+            err.trim()
+        );
+        return Err(format_unavailable_reason(&err).into());
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let val: serde_json::Value = serde_json::from_str(&json_str)?;
+    let parsed = parse_playlist_preview_json(&val, offset, page_limit);
+
+    info!(
+        target: "youtube",
+        duration_ms = duration_ms,
+        url = %clean,
+        range = %range_arg,
+        returned = parsed.tracks.len(),
+        has_more = parsed.has_more,
+        "[YouTube] Playlist preview extracted {} tracks in {}ms (has_more={})",
+        parsed.tracks.len(),
+        duration_ms,
+        parsed.has_more
+    );
+
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -380,5 +471,37 @@ mod tests {
             format_unavailable_reason("ERROR: unable to download video data: HTTP Error 403: Forbidden"),
             "Video stream is blocked or rate-limited by YouTube (HTTP 403/429)."
         );
+    }
+
+    #[test]
+    fn parses_paginated_playlist_preview_with_probe_item() {
+        let entries: Vec<serde_json::Value> = (1..=21)
+            .map(|i| serde_json::json!({ "id": format!("vid{}", i), "title": format!("Song {}", i), "duration": 120.0 }))
+            .collect();
+        let payload = serde_json::json!({
+            "title": "Mix - Test",
+            "entries": entries
+        });
+
+        let page1 = parse_playlist_preview_json(&payload, 0, 20);
+        assert_eq!(page1.tracks.len(), 20);
+        assert!(page1.has_more);
+        assert_eq!(page1.tracks[0].index, 1);
+        assert_eq!(page1.tracks[19].index, 20);
+
+        let page2_entries: Vec<serde_json::Value> = (21..=25)
+            .map(|i| serde_json::json!({ "id": format!("vid{}", i), "title": format!("Song {}", i), "duration": 100.0 }))
+            .collect();
+        let payload2 = serde_json::json!({
+            "title": "Mix - Test",
+            "playlist_count": 25,
+            "entries": page2_entries
+        });
+        let page2 = parse_playlist_preview_json(&payload2, 20, 20);
+        assert_eq!(page2.tracks.len(), 5);
+        assert!(!page2.has_more);
+        assert_eq!(page2.tracks[0].index, 21);
+        assert_eq!(page2.tracks[4].index, 25);
+        assert_eq!(page2.total_tracks, 25);
     }
 }

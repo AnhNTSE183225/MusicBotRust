@@ -158,7 +158,7 @@ api:
 
 # AI Service Settings
 ai:
-  model: "gemini-3.5-flash-lite"
+  model: "gemini-3.8-flash"
   candidate_multiplier: 2
   temperature: 0.85
   max_output_tokens: 2048

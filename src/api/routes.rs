@@ -897,7 +897,9 @@ pub async fn playlist_preview(
     Json(req): Json<PlaylistPreviewRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let _ = extract_session(&headers, Some(&q), &state).await?;
-    match crate::services::youtube::preview_playlist(&req.url).await {
+    let offset = req.offset.unwrap_or(0);
+    let limit = req.limit.unwrap_or(crate::services::youtube::DEFAULT_PLAYLIST_PAGE_SIZE);
+    match crate::services::youtube::preview_playlist(&req.url, offset, limit).await {
         Ok(res) => Ok(Json(json!(res))),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
@@ -955,12 +957,17 @@ pub async fn playlist_add(
             }
         }
     } else if let Some(url) = req.url {
-        let preview = crate::services::youtube::preview_playlist(&url)
+        let start = req.start_index.unwrap_or(1).max(1) as usize;
+        let offset = start.saturating_sub(1);
+        let limit = req
+            .end_index
+            .map(|e| (e as usize).max(start) - start + 1)
+            .unwrap_or(crate::services::youtube::DEFAULT_PLAYLIST_PAGE_SIZE);
+        let preview = crate::services::youtube::preview_playlist(&url, offset, limit)
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "detail": e.to_string() }))))?;
 
-        let start = req.start_index.unwrap_or(1).max(1) as usize;
-        let end = req.end_index.map(|e| e as usize).unwrap_or(preview.tracks.len());
+        let end = req.end_index.map(|e| e as usize).unwrap_or(offset + preview.tracks.len());
 
         for t in preview.tracks {
             let idx = t.index as usize;
