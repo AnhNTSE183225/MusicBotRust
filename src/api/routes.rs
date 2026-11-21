@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive},
         Html, IntoResponse, Redirect, Response, Sse,
@@ -15,19 +15,18 @@ use serde_json::json;
 use serenity::all::{ChannelType, GuildId, UserId};
 use tracing::{debug, error, info, warn};
 
+use crate::api::auth::{
+    extract_session, is_global_admin, is_guild_admin, AuthQuery, AuthenticatedUser, GlobalAdmin,
+    GuildAdmin,
+};
 use crate::api::AppState;
 use crate::db;
 use crate::models::{
     AIAutoQueueConfig, AIBatchConfirmRequest, AISearchRequest, AddPlaylistRequest, AddSongRequest,
     ContributeKeyRequest, DiscordGuild, DiscordUser, GuildSession,
     IndexRequest, PlaylistPreviewRequest,
-    ServerChannel, ServerMember, Song, UserSession, VolumeRequest,
+    ServerChannel, ServerMember, Song, VolumeRequest,
 };
-
-#[derive(Debug, Deserialize)]
-pub struct AuthQuery {
-    pub token: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
@@ -49,37 +48,6 @@ pub struct MobilePollQuery {
 #[derive(Debug, Deserialize)]
 pub struct DeleteOccurrenceQuery {
     pub occurrence: Option<String>,
-}
-
-pub async fn extract_session(
-    headers: &HeaderMap,
-    query: Option<&AuthQuery>,
-    state: &AppState,
-) -> Result<UserSession, (StatusCode, Json<serde_json::Value>)> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
-        .map(|s| s.trim().to_string())
-        .or_else(|| query.and_then(|q| q.token.clone()));
-
-    let token = match token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "detail": "Missing authentication token" })),
-            ))
-        }
-    };
-
-    match db::get_session(&state.pool, &token).await {
-        Some(sess) => Ok(sess),
-        None => Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "detail": "Invalid or expired session" })),
-        )),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +396,6 @@ pub async fn get_guilds(
             let mut user_channel_name = None;
             let mut guild_name = user_guild_opt.map(|g| g.name.clone()).unwrap_or_else(|| "Discord Server".to_string());
             let mut guild_icon = user_guild_opt.and_then(|g| g.icon.clone());
-            let is_owner = user_guild_opt.and_then(|g| g.owner).unwrap_or(false);
 
             if let Some(guild) = state.serenity_cache.guild(g_id) {
                 guild_name = guild.name.clone();
@@ -445,7 +412,7 @@ pub async fn get_guilds(
                 }
             }
 
-            let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+            let is_admin = is_guild_admin(&state, &session, g_id.get());
 
             guild_list.push(GuildSession {
                 id: g_id_str,
@@ -467,14 +434,14 @@ pub async fn get_guilds(
 
     // Fallback: If cache was empty or bot is starting up, include user guilds directly
     if guild_list.is_empty() {
-        for g in session.guilds {
+        for g in &session.guilds {
             let gid_u64: u64 = g.id.parse().unwrap_or(0);
             let bot_connected = state.voice_mgr.is_connected(gid_u64).await;
-            let is_admin = session.user.id == state.config.admin_user_id || g.owner.unwrap_or(false);
+            let is_admin = is_guild_admin(&state, &session, gid_u64);
             guild_list.push(GuildSession {
                 id: g.id.clone(),
                 name: g.name.clone(),
-                icon: g.icon.map(|ic| format!("https://cdn.discordapp.com/icons/{}/{}.png", g.id, ic)),
+                icon: g.icon.as_ref().map(|ic| format!("https://cdn.discordapp.com/icons/{}/{}.png", g.id, ic)),
                 channel_id: None,
                 channel_name: None,
                 bot_connected,
@@ -649,12 +616,7 @@ pub async fn control_skip(
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
     let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
 
-    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
-        guild.owner_id == UserId::new(uid_u64)
-    } else {
-        false
-    };
-    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+    let is_admin = is_guild_admin(&state, &session, gid_u64);
 
     let is_requester = {
         let cur = state.voice_mgr.get_queue_state(gid_u64).await;
@@ -739,12 +701,7 @@ pub async fn control_stop(
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
     let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
 
-    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
-        guild.owner_id == UserId::new(uid_u64)
-    } else {
-        false
-    };
-    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+    let is_admin = is_guild_admin(&state, &session, gid_u64);
 
     if is_admin {
         let _ = state.voice_mgr.leave_channel(gid_u64).await;
@@ -773,12 +730,7 @@ pub async fn control_pause(
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
     let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
 
-    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
-        guild.owner_id == UserId::new(uid_u64)
-    } else {
-        false
-    };
-    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+    let is_admin = is_guild_admin(&state, &session, gid_u64);
 
     if is_admin {
         let _ = state.voice_mgr.pause(gid_u64).await;
@@ -807,12 +759,7 @@ pub async fn control_resume(
     let gid_u64: u64 = guild_id.parse().unwrap_or(0);
     let uid_u64: u64 = session.user.id.parse().unwrap_or(0);
 
-    let is_owner = if let Some(guild) = state.serenity_cache.guild(GuildId::new(gid_u64)) {
-        guild.owner_id == UserId::new(uid_u64)
-    } else {
-        false
-    };
-    let is_admin = session.user.id == state.config.admin_user_id || is_owner;
+    let is_admin = is_guild_admin(&state, &session, gid_u64);
 
     if is_admin {
         let _ = state.voice_mgr.resume(gid_u64).await;
@@ -845,16 +792,23 @@ pub async fn control_loop(
 }
 
 pub async fn control_volume(
-    Path(guild_id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<AuthQuery>,
+    admin: GuildAdmin,
     State(state): State<AppState>,
     Json(req): Json<VolumeRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let _ = extract_session(&headers, Some(&q), &state).await?;
-    let gid_u64: u64 = guild_id.parse().unwrap_or(0);
-    let _ = state.voice_mgr.set_volume(gid_u64, req.volume).await;
-    Ok(Json(json!({ "status": "success" })))
+    let clamped = req.volume.clamp(0, 200);
+    info!(
+        target: "audio_control",
+        user_id = %admin.session.user.id,
+        username = %admin.session.user.username,
+        guild_id = admin.guild_id,
+        volume = clamped,
+        "[Control] Master volume set to {}% by admin {}",
+        clamped,
+        admin.session.user.username
+    );
+    let _ = state.voice_mgr.set_volume(admin.guild_id, clamped).await;
+    Ok(Json(json!({ "status": "success", "volume": clamped })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,7 +1116,7 @@ pub async fn list_gemini_keys(
     let session = extract_session(&headers, Some(&q), &state).await?;
     let keys = db::get_all_gemini_keys_for_display(&state.pool).await;
     let total_active = keys.iter().filter(|k| k.is_active && k.status == "healthy").count();
-    let is_admin = session.user.id == state.config.admin_user_id;
+    let is_admin = is_global_admin(&state, &session.user.id);
 
     Ok(Json(json!({
         "keys": keys,
@@ -1214,18 +1168,9 @@ pub async fn contribute_gemini_key(
 
 pub async fn remove_gemini_key(
     Path(key_id): Path<i64>,
-    headers: HeaderMap,
-    Query(q): Query<AuthQuery>,
+    GlobalAdmin(admin): GlobalAdmin,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let session = extract_session(&headers, Some(&q), &state).await?;
-    if session.user.id != state.config.admin_user_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "detail": "Only administrators can delete keys" })),
-        ));
-    }
-
     let deleted = db::delete_gemini_key(&state.pool, key_id).await.unwrap_or(false);
     if !deleted {
         return Err((
@@ -1233,6 +1178,16 @@ pub async fn remove_gemini_key(
             Json(json!({ "detail": "Key not found" })),
         ));
     }
+
+    info!(
+        target: "auth_audit",
+        user_id = %admin.user.id,
+        username = %admin.user.username,
+        key_id = key_id,
+        "[Admin] Deleted Gemini API key #{} by {}",
+        key_id,
+        admin.user.username
+    );
 
     Ok(Json(json!({ "status": "success" })))
 }
@@ -1460,14 +1415,13 @@ pub async fn create_schedule(
 }
 
 pub async fn update_schedule(
-    Path((_guild_id, event_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<AuthQuery>,
+    Path((guild_id, event_id)): Path<(String, String)>,
+    AuthenticatedUser(session): AuthenticatedUser,
     State(state): State<AppState>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let session = extract_session(&headers, Some(&q), &state).await?;
-    let is_admin = session.user.id == state.config.admin_user_id;
+    let gid_u64: u64 = guild_id.parse().unwrap_or(0);
+    let is_admin = is_guild_admin(&state, &session, gid_u64);
 
     // If start time is being modified, ensure it's not set to the past
     if let Some(start_str) = payload.get("start").and_then(|v| v.as_str()) {
@@ -1504,13 +1458,13 @@ pub async fn update_schedule(
 }
 
 pub async fn delete_schedule(
-    Path((_guild_id, event_id)): Path<(String, String)>,
+    Path((guild_id, event_id)): Path<(String, String)>,
     Query(del_q): Query<DeleteOccurrenceQuery>,
-    headers: HeaderMap,
+    AuthenticatedUser(session): AuthenticatedUser,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let session = extract_session(&headers, None, &state).await?;
-    let is_admin = session.user.id == state.config.admin_user_id;
+    let gid_u64: u64 = guild_id.parse().unwrap_or(0);
+    let is_admin = is_guild_admin(&state, &session, gid_u64);
 
     match db::delete_schedule_event(
         &state.pool,

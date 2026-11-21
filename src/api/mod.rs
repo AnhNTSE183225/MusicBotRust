@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod routes;
 
 use std::collections::HashMap;
