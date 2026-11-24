@@ -119,37 +119,19 @@ fi
 echo "OK: MusicBot started in background (PID $BOT_PID) on port 8000!"
 echo "Log: $RUNNER_LOG"
 
-# 5. Starting Tailscale Funnel in Background
-TS_PID_FILE="$ROOT_DIR/tailscale_funnel.pid"
-TS_LOG_FILE="$ROOT_DIR/logs/tailscale_funnel.log"
-TS_RUNNING=false
-if [ -f "$TS_PID_FILE" ]; then
-    TS_PID=$(cat "$TS_PID_FILE" 2>/dev/null || true)
-    if [ -n "$TS_PID" ] && kill -0 "$TS_PID" 2>/dev/null; then
-        TS_RUNNING=true
-    fi
-fi
-
-if [ "$TS_RUNNING" = false ]; then
-    ACTIVE_TS_PID=$(pgrep -f "tailscale funnel.*8000" | head -n 1 || true)
-    if [ -n "$ACTIVE_TS_PID" ]; then
-        echo "$ACTIVE_TS_PID" > "$TS_PID_FILE"
-        TS_RUNNING=true
-    fi
-fi
-
-if [ "$TS_RUNNING" = true ]; then
-    echo "Tailscale Funnel is already running (PID $(cat "$TS_PID_FILE" 2>/dev/null))."
-else
-    if command -v tailscale >/dev/null 2>&1; then
-        echo "Starting Tailscale Funnel on port 8000..."
-        sudo -n -v 2>/dev/null || true
-        (sudo -n tailscale funnel 8000 2>/dev/null || tailscale funnel 8000) > "$TS_LOG_FILE" 2>&1 &
-        TS_SUB_PID=$!
-        sleep 1
-        ACTUAL_TS_PID=$(pgrep -f "tailscale funnel.*8000" | head -n 1 || true)
-        echo "${ACTUAL_TS_PID:-$TS_SUB_PID}" > "$TS_PID_FILE"
-        echo "Tailscale funnel started! Logs are in $TS_LOG_FILE"
+# 5. Register shared Tailscale Funnel root path (/ -> 127.0.0.1:8000) in --bg mode if not already present
+# (Never resets existing sub-paths like /scheduler, and stop.sh intentionally leaves Funnel intact.)
+if command -v tailscale >/dev/null 2>&1; then
+    FUNNEL_STATUS="$(tailscale funnel status 2>/dev/null || true)"
+    if echo "$FUNNEL_STATUS" | grep -qE "(/|proxy) .*127\.0\.0\.1:8000"; then
+        echo "OK: Tailscale Funnel already serving / -> 127.0.0.1:8000."
+    else
+        echo "Registering Tailscale Funnel route / -> http://127.0.0.1:8000..."
+        if (sudo -n tailscale funnel --bg --yes --https=443 --set-path=/ "http://127.0.0.1:8000" >/dev/null 2>&1 || tailscale funnel --bg --yes --https=443 --set-path=/ "http://127.0.0.1:8000" >/dev/null 2>&1); then
+            echo "OK: Tailscale Funnel serving / -> 127.0.0.1:8000."
+        else
+            echo "WARN: Could not configure Tailscale Funnel automatically (run once: sudo tailscale funnel --bg --yes --https=443 --set-path=/ http://127.0.0.1:8000)."
+        fi
     fi
 fi
 
