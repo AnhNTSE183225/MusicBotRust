@@ -25,18 +25,29 @@ fi
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env" || true
 export PATH="$HOME/.cargo/bin:$PATH"
 
+if [ -z "${CARGO_TARGET_DIR:-}" ] && ! cargo config get build.target-dir >/dev/null 2>&1; then
+    export CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/cargo-target"
+fi
+TARGET_ROOT="${CARGO_TARGET_DIR:-$(cargo config get build.target-dir 2>/dev/null | tr -d '"' || echo "$ROOT_DIR/target")}"
+
 if [ "${1:-}" = "-Clean" ] || [ "${1:-}" = "--clean" ]; then
-    echo "Cleaning build artifacts..."
-    cargo clean
+    echo "Cleaning build artifacts for musicbot..."
+    rm -rf "$ROOT_DIR/target"
+    cargo clean -p musicbot || true
 fi
 
 echo "Compiling Rust binary in release mode (--release)..."
 cargo build --release
 
+mkdir -p "$ROOT_DIR/target/release"
+BUILT_BIN="$TARGET_ROOT/release/musicbot"
 RELEASE_BIN="$ROOT_DIR/target/release/musicbot"
-if [ ! -f "$RELEASE_BIN" ]; then
-    echo "ERROR: Target binary not found at $RELEASE_BIN"
+if [ ! -f "$BUILT_BIN" ]; then
+    echo "ERROR: Target binary not found at $BUILT_BIN"
     exit 1
+fi
+if [ "$(realpath "$BUILT_BIN")" != "$(realpath -m "$RELEASE_BIN")" ]; then
+    cp -f "$BUILT_BIN" "$RELEASE_BIN"
 fi
 
 BIN_SIZE="$(du -h "$RELEASE_BIN" | cut -f1)"

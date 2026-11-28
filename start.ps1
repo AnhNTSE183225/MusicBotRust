@@ -79,7 +79,22 @@ if (-not (Test-Path $releaseExe)) {
     }
 }
 
-# 4. Load environment from .env
+# 4. Load environment from .env (tracked so caller PowerShell session stays clean after spawn)
+$savedEnv = @{}
+function Set-ScopedEnv {
+    param([string]$Key, [string]$Value)
+    if (-not $savedEnv.ContainsKey($Key)) {
+        $savedEnv[$Key] = [System.Environment]::GetEnvironmentVariable($Key, "Process")
+    }
+    [System.Environment]::SetEnvironmentVariable($Key, $Value, "Process")
+}
+function Restore-ScopedEnv {
+    foreach ($entry in $savedEnv.GetEnumerator()) {
+        [System.Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+    }
+}
+
+try {
 $envFile = Join-Path $root ".env"
 if (Test-Path $envFile) {
     Get-Content $envFile | ForEach-Object {
@@ -90,7 +105,7 @@ if (Test-Path $envFile) {
             if (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'"))) {
                 $val = $val.Substring(1, $val.Length - 2)
             }
-            [System.Environment]::SetEnvironmentVariable($key, $val, "Process")
+            Set-ScopedEnv -Key $key -Value $val
         }
     }
 }
@@ -98,15 +113,15 @@ if (Test-Path $envFile) {
 # Enforce DEV profile credentials if DEV is selected
 $discordProfile = if ($env:DISCORD_PROFILE) { ($env:DISCORD_PROFILE -split '#')[0].Trim().ToUpper() } else { "DEV" }
 if ($discordProfile -eq "DEV") {
-    if ($env:DEV_DISCORD_TOKEN) { $env:DISCORD_TOKEN = $env:DEV_DISCORD_TOKEN }
-    if ($env:DEV_DISCORD_CLIENT_ID) { $env:DISCORD_CLIENT_ID = $env:DEV_DISCORD_CLIENT_ID }
-    if ($env:DEV_DISCORD_CLIENT_SECRET) { $env:DISCORD_CLIENT_SECRET = $env:DEV_DISCORD_CLIENT_SECRET }
-    if (-not $env:RUST_LOG) { $env:RUST_LOG = "musicbot=debug,tower_http=debug,axum=debug,songbird=info" }
+    if ($env:DEV_DISCORD_TOKEN) { Set-ScopedEnv -Key "DISCORD_TOKEN" -Value $env:DEV_DISCORD_TOKEN }
+    if ($env:DEV_DISCORD_CLIENT_ID) { Set-ScopedEnv -Key "DISCORD_CLIENT_ID" -Value $env:DEV_DISCORD_CLIENT_ID }
+    if ($env:DEV_DISCORD_CLIENT_SECRET) { Set-ScopedEnv -Key "DISCORD_CLIENT_SECRET" -Value $env:DEV_DISCORD_CLIENT_SECRET }
+    if (-not $env:RUST_LOG) { Set-ScopedEnv -Key "RUST_LOG" -Value "musicbot=debug,tower_http=debug,axum=debug,songbird=info" }
     Write-RunnerLog "[DEV] Active Discord Profile: DEV (Debug logs enabled)" Magenta
 } else {
-    if (-not $env:RUST_LOG) { $env:RUST_LOG = "musicbot=info,tower_http=info,songbird=info" }
+    if (-not $env:RUST_LOG) { Set-ScopedEnv -Key "RUST_LOG" -Value "musicbot=info,tower_http=info,songbird=info" }
 }
-if (-not $env:RUST_BACKTRACE) { $env:RUST_BACKTRACE = "1" }
+if (-not $env:RUST_BACKTRACE) { Set-ScopedEnv -Key "RUST_BACKTRACE" -Value "1" }
 
 if ($Foreground) {
     Set-Content -Path $pidFile -Value $PID
@@ -153,6 +168,9 @@ $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @
     CommandLine = $cmdLine
     CurrentDirectory = $root
     ProcessStartupInformation = $startup
+}
+} finally {
+    Restore-ScopedEnv
 }
 
 if ($res.ReturnValue -ne 0) {
