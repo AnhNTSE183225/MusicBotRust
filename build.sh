@@ -25,6 +25,40 @@ fi
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env" || true
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# Phase 0: Zero-Assumption Toolchain Check
+try_pkg_install() {
+    local apt_pkgs="$1" dnf_pkgs="$2" pacman_pkgs="$3"
+    command -v sudo &>/dev/null || return 1
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get update -y && sudo apt-get install -y $apt_pkgs && return 0
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y $dnf_pkgs && return 0
+    elif command -v pacman &>/dev/null; then
+        sudo pacman -Sy --noconfirm $pacman_pkgs && return 0
+    fi
+    return 1
+}
+
+if ! command -v cc &>/dev/null || ! command -v pkg-config &>/dev/null; then
+    try_pkg_install "build-essential pkg-config libssl-dev curl" "gcc gcc-c++ make pkgconfig openssl-devel curl" "base-devel pkgconf openssl curl" || true
+    if ! command -v cc &>/dev/null || ! command -v pkg-config &>/dev/null; then
+        echo "ERROR: Missing C compiler/linker or pkg-config. Install: sudo apt update && sudo apt install -y build-essential pkg-config libssl-dev" >&2
+        exit 1
+    fi
+fi
+
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    if command -v curl &>/dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || true
+        [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env" || true
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+    if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+        echo "ERROR: Missing Rust toolchain (https://rustup.rs/). Run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y" >&2
+        exit 1
+    fi
+fi
+
 cd "$ROOT_DIR"
 
 if [ -z "${CARGO_TARGET_DIR:-}" ] && ! cargo config get build.target-dir >/dev/null 2>&1; then

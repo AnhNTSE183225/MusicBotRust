@@ -99,6 +99,7 @@ export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
 # 5. Start in background (stream all stdout/stderr—including panics & exiting logs—into journald -> VictoriaLogs)
 echo "Starting MusicBot in background..."
+cd "$ROOT_DIR"
 if command -v systemd-cat >/dev/null 2>&1; then
     nohup "$RELEASE_BIN" < /dev/null > >(tee -a "$RUNNER_LOG" | systemd-cat -t musicbot) 2>&1 &
 else
