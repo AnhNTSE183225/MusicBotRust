@@ -25,6 +25,8 @@ fi
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env" || true
 export PATH="$HOME/.cargo/bin:$PATH"
 
+cd "$ROOT_DIR"
+
 if [ -z "${CARGO_TARGET_DIR:-}" ] && ! cargo config get build.target-dir >/dev/null 2>&1; then
     export CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/cargo-target"
 fi
